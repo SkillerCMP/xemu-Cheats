@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref (commit, branch, or tag) to build
+        required: true
+        type: string
+    outputs:
+      pkg_version:
+        description: Build version
+        value: ${{ jobs.source.outputs.pkg_version }}
+
+jobs:
+  source:
+    name: Create source package
+    runs-on: ubuntu-latest
+    outputs:
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
+    steps:
+    - name: Clone tree
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      with:
+        fetch-depth: 0
+        ref: ${{ inputs.ref }}
+    - name: Validate Debug Tools ownership
+      shell: bash
+      run: python3 ./ui/xui/debug-tools/validate-project-layout.py --root .
+    - name: Run Debug Tools regression tests
+      shell: bash
+      run: python3 ./ui/xui/debug-tools/tests/run-regression-tests.py --root .
+    - name: Restore script executable permissions
+      shell: bash
+      run: python3 ./ui/xui/debug-tools/restore-executable-bits.py --root . --update-git-index
+    - name: Install dependencies
+      run: sudo apt-get install meson
+    - name: Determine release version
+      id: version
+      run: |
+        if TAG=$(git describe --tags --match 'v*' 2>/dev/null); then
+          echo "pkg_version=${TAG#v}" >> $GITHUB_OUTPUT
+        else
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          echo "pkg_version=0.0.0-0-unofficial-${SHORT_HASH}" >> $GITHUB_OUTPUT
+        fi
+    - name: Create source package
+      id: package
+      run: |
+        pkg_name="xemu-${{ steps.version.outputs.pkg_version }}"
+        tar_filename="${pkg_name}.tar"
+        tar_prefix="./${pkg_name}/"
+        bash ./scripts/archive-source.sh ${tar_filename} ${tar_prefix}
+
+        echo -n ${{ github.sha }} > XEMU_COMMIT
+        echo -n ${{ steps.version.outputs.pkg_version }} > XEMU_VERSION
+        tar -r --file "${tar_filename}" --transform "s,^./,${tar_prefix}," ./XEMU_COMMIT ./XEMU_VERSION
+
+        zstd "${tar_filename}"
+        echo "pkg_filename=${tar_filename}.zst" >> $GITHUB_OUTPUT
+    - name: Upload source package artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+      with:
+        name: src
+        path: ${{ steps.package.outputs.pkg_filename }}
+        compression-level: 0
+
+  windows:
+    name: Windows x86_64 Release
+    needs: source
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      pkg_version: ${{ needs.source.outputs.pkg_version }}

@@ -1,0 +1,264 @@
+//
+// xemu RAW Cheat Engine
+//
+// Copyright (C) 2026 xemu contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+#pragma once
+
+#include "../common.hh"
+#include "x86-cheat-assembler.hh"
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+/* Defined by cheat-engine-memory.h.  Only a reference appears in this
+ * interface, so keep the QEMU/debug bridge header out of this C++ header and
+ * forward-declare the existing register snapshot type here. */
+struct XemuCheatX86Registers;
+
+class CheatEngineWindow
+{
+public:
+    bool is_open = false;
+
+    struct FTempBankInfo {
+        std::string cheat_name;
+        uint32_t hook_address = 0;
+        uint32_t cave_address = 0;
+        uint32_t cave_size = 0;
+        uint32_t temp_address = 0;
+    };
+
+    struct DebuggerF0HookInfo {
+        bool installed = false;
+        uint32_t hook_address = 0;
+        uint32_t overwrite_length = 0;
+        uint32_t cave_address = 0;
+        uint32_t code_size = 0;
+        uint32_t return_address = 0;
+    };
+
+    CheatEngineWindow();
+
+    void Draw(bool detached = false);
+    void Tick();
+    void GetActiveF0TempBanks(std::vector<FTempBankInfo> &out) const;
+
+    /* x86 Debugger Inject > CodeCave uses the exact Type-F0 assembler,
+     * allocator, hook sizing, rollback, and cave retirement rules as the
+     * normal Cheat Engine. The debugger owns one temporary hook at a time. */
+    bool InstallDebuggerF0(uint32_t hook_address, const std::string &source,
+                           DebuggerF0HookInfo &info, std::string &status);
+    bool RemoveDebuggerF0(std::string &status);
+    bool GetDebuggerF0HookInfo(DebuggerF0HookInfo &info) const;
+    bool ActiveFHookOwnsAddress(uint32_t hook_address) const;
+
+private:
+    enum class GuestAddressSpace {
+        Physical,
+        Virtual,
+    };
+
+    struct RawCode {
+        uint32_t command = 0;
+        uint32_t value = 0;
+        int source_line = 0;
+        std::string source;
+        /* F0/F1 own their body text through DEADCODE. Keeping the body inside
+         * one logical RawCode makes D/E and Type-9 scopes treat a complete
+         * external cave as one command instead of counting source lines. */
+        std::vector<XemuCheatAsmLine> f_body;
+        bool f_terminated = false;
+        /* F1 uses DEADCODE 000000NN, where NN=01..08 is the number of
+         * meaningful bytes in the final padded 8-byte raw line. F0 leaves
+         * this at zero because its DEADCODE directive has no operand. */
+        uint8_t f_final_valid_bytes = 0;
+    };
+
+    struct CheatBlock {
+        std::string name;
+        std::string description;
+        std::string credits;
+        bool selected = false;
+        bool enabled = false;
+        int group_index = 0;
+        std::vector<RawCode> codes;
+    };
+
+    struct CheatGroup {
+        std::string name;
+        std::vector<int> child_groups;
+        std::vector<size_t> cheats;
+    };
+
+    struct FileHeader {
+        std::string hash;
+        std::string game_id;
+        std::string name;
+        uint32_t title_id = 0;
+        bool title_id_valid = false;
+    };
+
+    struct AddressContext {
+        GuestAddressSpace space = GuestAddressSpace::Virtual;
+        uint32_t base = 0;
+        uint32_t remaining = 0;
+        bool until_end = false;
+    };
+
+    struct SwitchState {
+        bool on = false;
+        bool previous_condition = false;
+    };
+
+    struct FHookState {
+        size_t owner_block = 0;
+        uint32_t hook_address = 0;
+        uint32_t overwrite_length = 0;
+        uint32_t external_entry = 0;
+        uint32_t allocation_size = 0;
+        uint32_t code_size = 0;
+        uint32_t preserve_entry = 0;
+        uint32_t preserve_size = 0;
+        uint32_t temp_entry = 0;
+        uint32_t temp_size = 0;
+        bool installed = false;
+        bool retired_may_be_referenced = false;
+        std::vector<uint8_t> original_bytes;
+        std::string definition_signature;
+    };
+
+    bool m_engine_enabled = true;
+    bool m_code_aware_skip = false;
+    bool m_auto_load_current_game = true;
+    bool m_live_cheats_enabled = false;
+    bool m_show_help = false;
+    std::string m_source;
+    std::vector<CheatBlock> m_blocks;
+    std::vector<CheatGroup> m_groups;
+    std::vector<std::string> m_parse_messages;
+    std::string m_last_runtime_message;
+    std::string m_file_status;
+    std::string m_loaded_path;
+    uint64_t m_seen_game_generation = UINT64_MAX;
+    std::unordered_map<uint64_t, SwitchState> m_switches;
+    std::unordered_map<uint64_t, FHookState> m_f_hooks;
+    std::vector<uint64_t> m_active_f_hooks_scratch;
+    std::vector<AddressContext> m_address_context_scratch;
+
+    static constexpr uint64_t kDebuggerFHookKey = UINT64_MAX;
+    static constexpr size_t kDebuggerFHookOwner = (size_t)-1;
+
+    bool ParseDebuggerF0Source(uint32_t hook_address, const std::string &source,
+                               RawCode &code, std::string &error) const;
+    void FillDebuggerF0HookInfo(const FHookState &state,
+                                DebuggerF0HookInfo &info) const;
+
+    void ParseSource(bool preserve_states = true);
+    void ExecuteBlock(size_t block_index, CheatBlock &block);
+    bool ExecuteBasicWrite(const RawCode &code, GuestAddressSpace active_space,
+                           uint32_t active_base);
+    bool ExecuteArithmetic(const CheatBlock &block, size_t index,
+                           GuestAddressSpace active_space, uint32_t active_base,
+                           size_t &next_index);
+    bool ExecuteSerial(const CheatBlock &block, size_t index,
+                       GuestAddressSpace active_space, uint32_t active_base,
+                       size_t &next_index);
+    bool ExecuteCopy(const CheatBlock &block, size_t index,
+                     GuestAddressSpace active_space, uint32_t active_base,
+                     size_t &next_index);
+    bool ExecutePointer(const CheatBlock &block, size_t index,
+                        GuestAddressSpace active_space, uint32_t active_base,
+                        size_t &next_index);
+    bool ExecuteBitwise(const RawCode &code, GuestAddressSpace active_space,
+                        uint32_t active_base);
+    bool PrepareAddressContext(const RawCode &code,
+                               const std::vector<AddressContext> &contexts,
+                               uint32_t active_base, AddressContext &next_context,
+                               bool &push_context);
+    bool ExecuteRawBytes(const CheatBlock &block, size_t index,
+                         GuestAddressSpace active_space, uint32_t active_base,
+                         size_t &next_index);
+    bool ExecuteTypeF(size_t block_index, size_t code_index, const RawCode &code,
+                      GuestAddressSpace active_space, uint32_t active_base,
+                      std::vector<uint64_t> &active_hooks);
+    bool ExecuteConditional(size_t block_index, const CheatBlock &block,
+                            size_t index, const RawCode &code,
+                            const std::vector<AddressContext> &contexts,
+                            GuestAddressSpace active_space, uint32_t active_base,
+                            size_t &next_index);
+    void MaybeAutoLoadCurrentGame();
+    bool LoadMatchingCurrentGameFile(bool force_reload = false);
+    bool LoadSourceFile(const std::string &path);
+    std::string CheatDirectory() const;
+    void DrawGroup(int group_index);
+    void DrawCheat(size_t block_index);
+    void SetGroupSelected(int group_index, bool selected);
+    void SetLiveCheatsEnabled(bool enabled);
+    void DisableAllCheats(bool clear_selection);
+    void DrawMenuBar();
+    void DrawHelpPopup();
+    bool ReloadCurrentCheatFile();
+    bool EditOrCreateCurrentCheatFile();
+    bool OpenCheatDirectory();
+    bool OpenPathExternally(const std::string &path);
+    std::string SuggestedCurrentCheatPath() const;
+    void CountGroupSelection(int group_index, size_t &selected,
+                             size_t &total) const;
+
+    bool ReadGuest(GuestAddressSpace space, uint32_t address,
+                   void *buffer, size_t size);
+    bool WriteGuest(GuestAddressSpace space, uint32_t address,
+                    const void *buffer, size_t size);
+    bool ReadValue(GuestAddressSpace space, uint32_t address,
+                   size_t size, uint32_t &value);
+    bool WriteValue(GuestAddressSpace space, uint32_t address,
+                    size_t size, uint32_t value);
+    bool InstallFHook(size_t owner_block, uint64_t key,
+                      uint32_t hook_address,
+                      const std::vector<uint8_t> &probe_code,
+                      const std::vector<uint8_t> &probe_data,
+                      const std::vector<XemuCheatAsmLine> *f0_source,
+                      bool f0_uses_preserve, uint32_t preserve_bytes,
+                      bool f0_uses_temp, uint32_t temp_bytes,
+                      const std::string &definition_signature);
+    bool DetermineFHookLength(uint32_t hook_address,
+                              uint32_t &overwrite_length);
+    static bool ParseFRawHex(const RawCode &code, std::vector<uint8_t> &bytes,
+                             std::string &error, int &error_line);
+    static bool FHookHasTrackedEntries(const FHookState &state);
+    static bool FHookHasResources(const FHookState &state);
+    static void ClearReleasedFHookState(FHookState &state);
+    bool FHookCaveMayStillBeReferenced(const FHookState &state,
+                                        const XemuCheatX86Registers &regs);
+    bool ReleaseFHookCaveIfSafe(FHookState &state);
+    void DeactivateFHook(uint64_t key);
+    void DeactivateFHooksForBlock(size_t owner_block);
+    void DeactivateAllFHooks();
+
+    static bool ParseCodeLine(const std::string &line, RawCode &out,
+                              int source_line);
+    static bool ParseHeader(const std::string &source, FileHeader &out);
+    static bool ParseGameId(const std::string &text, uint32_t &title_id);
+    static bool HashMatches(const std::string &file_hash,
+                            const std::string &current_hash);
+    static std::string Trim(const std::string &s);
+    static std::string Upper(const std::string &s);
+    static std::string NormalizeTypeFLine(const std::string &line);
+    static std::string TypeFDirective(const std::string &line);
+    static bool ParseDeadcodeCount(const std::string &text, uint8_t &out);
+
+    static uint32_t Type9Count(const RawCode &code);
+    size_t LogicalSpan(const std::vector<RawCode> &codes, size_t index) const;
+    size_t SkipLogicalCommands(const std::vector<RawCode> &codes,
+                               size_t start, uint32_t count) const;
+};
+
+extern CheatEngineWindow cheat_engine_window;
