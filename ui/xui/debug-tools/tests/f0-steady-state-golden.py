@@ -15,25 +15,7 @@ import pathlib
 import random
 import string
 import sys
-
-
-def extract_function(text: str, signature: str) -> str:
-    start = text.find(signature)
-    if start < 0:
-        raise AssertionError(f"missing function signature: {signature}")
-    brace = text.find("{", start)
-    if brace < 0:
-        raise AssertionError("function opening brace missing")
-    depth = 0
-    for pos in range(brace, len(text)):
-        ch = text[pos]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : pos + 1]
-    raise AssertionError("function closing brace missing")
+from source_test_utils import extract_function, read_memory_tools_implementation
 
 
 def build_signature(lines: list[str]) -> str:
@@ -50,6 +32,7 @@ def main() -> int:
 
     cheat_cc = (debug / "cheat-engine.cc").read_text(encoding="utf-8")
     body = extract_function(cheat_cc, "bool CheatEngineWindow::ExecuteTypeF(")
+    precompile = extract_function(cheat_cc, "void CheatEngineWindow::PrecompileTypeF(")
 
     ordered = [
         "if (flags != 0)",
@@ -57,12 +40,11 @@ def main() -> int:
         "if (!code.f_terminated)",
         "if (active_space != GuestAddressSpace::Virtual)",
         "const uint32_t hook_address = active_base + code.value;",
-        'definition_signature = "F0\\n";',
-        "auto installed = m_f_hooks.find(hook_key);",
-        "installed->second.definition_signature == definition_signature",
+        "if (!code.f_precompiled || !code.f_precompile_ok)",
+        "const std::vector<XemuCheatAsmLine> *f0_source",
+        "InstallFHook(block_index, hook_key, hook_address",
         "active_hooks.push_back(hook_key);",
         "return true;",
-        "xemu_cheat_assemble_x86_32(code.f_body, assembled)",
     ]
     last = -1
     for token in ordered:
@@ -111,19 +93,24 @@ def main() -> int:
             if new_has != (probe in old_set):
                 raise AssertionError("active F-hook vector membership mismatch")
 
-    # Freeze the exact canonical F0 signature formula that existed before the
-    # fast path was moved ahead of probe assembly.
+    # Freeze the exact canonical F0 signature formula, now built once at parse time.
     required_signature_tokens = (
         "signature_size = 3u",
         "signature_size += src.text.size() + 1u",
-        "definition_signature.reserve(signature_size)",
-        'definition_signature = "F0\\n"',
-        "definition_signature += src.text",
-        "definition_signature.push_back('\\n')",
+        "code.f_definition_signature.reserve(signature_size)",
+        r'code.f_definition_signature = "F0\n"',
+        "code.f_definition_signature += src.text",
+        r"code.f_definition_signature.push_back('\n')",
     )
     for token in required_signature_tokens:
-        if token not in body:
+        if token not in precompile:
             raise AssertionError(f"F0 definition signature changed: missing `{token}`")
+    if "xemu_cheat_assemble_x86_32(code.f_body, assembled)" not in precompile:
+        raise AssertionError("F0 probe no longer precompiled at parse time")
+    if "ParseFRawHex(code, code.f_probe_code" not in precompile:
+        raise AssertionError("F1 raw bytes no longer precompiled at parse time")
+    if "xemu_cheat_assemble_x86_32(code.f_body, assembled)" in body:
+        raise AssertionError("steady ExecuteTypeF path reintroduced per-tick F0 assembly")
 
     # Model signature stability across arbitrary source text. This protects the
     # equality key used by the early-return path from accidental normalization.
@@ -142,15 +129,15 @@ def main() -> int:
             raise AssertionError("F0 definition signature model mismatch")
 
     # Final triple-audit dead paths must not silently return.
-    combined = "\n".join(
-        (debug / rel).read_text(encoding="utf-8")
-        for rel in (
-            "cheat-engine.cc", "cheat-engine.hh",
-            "memory-tools.cc", "memory-tools.hh",
-            "cheat-engine-memory.c", "cheat-engine-memory.h",
-            "external-code-memory.c",
-        )
-    )
+    combined = "\n".join((
+        (debug / "cheat-engine.cc").read_text(encoding="utf-8"),
+        (debug / "cheat-engine.hh").read_text(encoding="utf-8"),
+        read_memory_tools_implementation(debug),
+        (debug / "memory-tools.hh").read_text(encoding="utf-8"),
+        (debug / "cheat-engine-memory.c").read_text(encoding="utf-8"),
+        (debug / "cheat-engine-memory.h").read_text(encoding="utf-8"),
+        (debug / "external-code-memory.c").read_text(encoding="utf-8"),
+    ))
     removed_symbols = (
         "MemoryToolsWindow::DrawViewer(",
         "MemoryToolsWindow::DrawMemoryMap(",
@@ -167,7 +154,7 @@ def main() -> int:
         if symbol in combined:
             raise AssertionError(f"removed dead path returned: {symbol}")
 
-    print("PASS: F0 steady-state fast path + final dead-code audit")
+    print("PASS: F0 parse-time precompile + steady-state fast path + final dead-code audit")
     return 0
 
 

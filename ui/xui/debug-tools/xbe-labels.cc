@@ -242,7 +242,11 @@ static void add_label(Database &db, uint32_t address, Type type,
     if (name.empty() || db.labels.size() >= kMaxLabels) {
         return;
     }
-    db.labels.push_back({address, type, std::move(name)});
+    Label label;
+    label.virtual_address = address;
+    label.type = type;
+    label.name = std::move(name);
+    db.labels.push_back(std::move(label));
 }
 
 static uint32_t infer_function_start(const uint8_t *code, size_t code_size,
@@ -263,18 +267,72 @@ static uint32_t infer_function_start(const uint8_t *code, size_t code_size,
     return 0;
 }
 
+static int source_priority(Source source)
+{
+    switch (source) {
+    case Source::Manual: return 0;
+    case Source::Pdb: return 1;
+    case Source::Map: return 2;
+    case Source::Xdk: return 3;
+    case Source::Xbe: return 4;
+    }
+    return 99;
+}
+
+static int confidence_priority(Confidence confidence)
+{
+    switch (confidence) {
+    case Confidence::Exact: return 0;
+    case Confidence::Manual: return 1;
+    case Confidence::High: return 2;
+    case Confidence::Inferred: return 3;
+    }
+    return 99;
+}
+
 static int type_priority(Type type)
 {
     switch (type) {
     case Type::Entry: return 0;
-    case Type::Inferred: return 1;
-    case Type::Xref: return 2;
-    case Type::Kernel: return 3;
-    case Type::Section: return 4;
-    case Type::Rtti: return 5;
-    case Type::String: return 6;
+    case Type::Function: return 1;
+    case Type::Symbol: return 2;
+    case Type::Inferred: return 3;
+    case Type::Xref: return 4;
+    case Type::Kernel: return 5;
+    case Type::Section: return 6;
+    case Type::Rtti: return 7;
+    case Type::String: return 8;
     }
     return 99;
+}
+
+static std::string upper_ascii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return (char)std::toupper(ch); });
+    return value;
+}
+
+static void attach_section_locations(Database &db)
+{
+    for (Label &label : db.labels) {
+        label.has_section_location = false;
+        label.section_name.clear();
+        label.section_offset = 0;
+        for (const SectionInfo &section : db.sections) {
+            const uint64_t span = std::max<uint32_t>(section.virtual_size,
+                                                     section.raw_size);
+            const uint64_t end = (uint64_t)section.virtual_address + span;
+            if ((uint64_t)label.virtual_address >= section.virtual_address &&
+                (uint64_t)label.virtual_address < end) {
+                label.section_name = section.name;
+                label.section_offset = label.virtual_address -
+                                       section.virtual_address;
+                label.has_section_location = true;
+                break;
+            }
+        }
+    }
 }
 
 } // namespace
@@ -289,8 +347,72 @@ const char *TypeName(Type type)
     case Type::Xref: return "XREF";
     case Type::Rtti: return "RTTI";
     case Type::Inferred: return "INFERRED";
+    case Type::Function: return "FUNCTION";
+    case Type::Symbol: return "SYMBOL";
     }
     return "UNKNOWN";
+}
+
+bool TypeFromName(const std::string &name, Type &type)
+{
+    const std::string value = upper_ascii(name);
+    for (int i = (int)Type::Entry; i <= (int)Type::Symbol; ++i) {
+        const Type candidate = (Type)i;
+        if (value == TypeName(candidate)) {
+            type = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *SourceName(Source source)
+{
+    switch (source) {
+    case Source::Xbe: return "XBE";
+    case Source::Xdk: return "XDK";
+    case Source::Pdb: return "PDB";
+    case Source::Map: return "MAP";
+    case Source::Manual: return "MANUAL";
+    }
+    return "UNKNOWN";
+}
+
+bool SourceFromName(const std::string &name, Source &source)
+{
+    const std::string value = upper_ascii(name);
+    for (int i = (int)Source::Xbe; i <= (int)Source::Manual; ++i) {
+        const Source candidate = (Source)i;
+        if (value == SourceName(candidate)) {
+            source = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *ConfidenceName(Confidence confidence)
+{
+    switch (confidence) {
+    case Confidence::Exact: return "EXACT";
+    case Confidence::High: return "HIGH";
+    case Confidence::Inferred: return "INFERRED";
+    case Confidence::Manual: return "MANUAL";
+    }
+    return "UNKNOWN";
+}
+
+bool ConfidenceFromName(const std::string &name, Confidence &confidence)
+{
+    const std::string value = upper_ascii(name);
+    for (int i = (int)Confidence::Exact; i <= (int)Confidence::Manual; ++i) {
+        const Confidence candidate = (Confidence)i;
+        if (value == ConfidenceName(candidate)) {
+            confidence = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
@@ -309,6 +431,7 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
     uint32_t encoded_entry = 0;
     uint32_t tls_va = 0;
     uint32_t encoded_thunk = 0;
+    uint32_t library_version_count = 0;
     uint32_t library_versions_va = 0;
     if (!read_u32(file, 0x104, base) ||
         !read_u32(file, 0x10C, image_size) ||
@@ -317,6 +440,7 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
         !read_u32(file, 0x128, encoded_entry) ||
         !read_u32(file, 0x12C, tls_va) ||
         !read_u32(file, 0x158, encoded_thunk) ||
+        !read_u32(file, 0x160, library_version_count) ||
         !read_u32(file, 0x164, library_versions_va)) {
         error = "default.xbe header is truncated.";
         return false;
@@ -361,9 +485,14 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
             return false;
         }
         sections.push_back(section);
+        db.sections.push_back({section.name, section.virtual_address,
+                               section.virtual_size, section.raw_size,
+                               section.raw_address, section.flags});
         add_label(db, section.virtual_address, Type::Section,
                   "section_" + sanitize_label(section.name));
     }
+    db.image_base = base;
+    db.image_size = image_size;
 
     uint32_t entry = 0;
     if (decode_inside_image(encoded_entry, kRetailEntryKey, kDebugEntryKey,
@@ -378,6 +507,32 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
         (uint64_t)library_versions_va < (uint64_t)base + image_size) {
         add_label(db, library_versions_va, Type::Section,
                   "XBE_LibraryVersions");
+    }
+    if (library_version_count <= 256 && library_versions_va >= base) {
+        const uint64_t library_offset = (uint64_t)library_versions_va - base;
+        if (range_inside(library_offset,
+                         (uint64_t)library_version_count * 16, file.size())) {
+            for (uint32_t i = 0; i < library_version_count; ++i) {
+                const uint8_t *entry = file.data() + library_offset + i * 16;
+                char name[9] = {};
+                std::memcpy(name, entry, 8);
+                std::string library_name(name);
+                while (!library_name.empty() &&
+                       (library_name.back() == ' ' || library_name.back() == '\0')) {
+                    library_name.pop_back();
+                }
+                if (library_name.empty()) {
+                    continue;
+                }
+                LibraryVersion version;
+                version.name = library_name;
+                version.major = (uint16_t)entry[8] | ((uint16_t)entry[9] << 8);
+                version.minor = (uint16_t)entry[10] | ((uint16_t)entry[11] << 8);
+                version.build = (uint16_t)entry[12] | ((uint16_t)entry[13] << 8);
+                version.qfe = (uint16_t)entry[14] | ((uint16_t)entry[15] << 8);
+                db.libraries.push_back(std::move(version));
+            }
+        }
     }
 
     uint32_t thunk_va = 0;
@@ -503,10 +658,57 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
         }
     }
 
+    for (Label &label : db.labels) {
+        label.source = Source::Xbe;
+        label.confidence = label.type == Type::Inferred
+                               ? Confidence::Inferred
+                               : Confidence::Exact;
+    }
+    attach_section_locations(db);
+    SortAndUnique(db);
+
+    if (db.labels.empty()) {
+        error = "default.xbe parsed but produced no useful labels.";
+        return false;
+    }
+    return true;
+}
+
+bool ResolveSectionLocation(const Database &db,
+                            const std::string &section_name,
+                            uint32_t section_offset, uint32_t &virtual_address)
+{
+    for (const SectionInfo &section : db.sections) {
+        if (section.name != section_name) {
+            continue;
+        }
+        const uint64_t span = std::max<uint32_t>(section.virtual_size,
+                                                 section.raw_size);
+        if ((uint64_t)section_offset >= span) {
+            return false;
+        }
+        const uint64_t resolved = (uint64_t)section.virtual_address +
+                                  section_offset;
+        if (resolved > 0xFFFFFFFFull) {
+            return false;
+        }
+        virtual_address = (uint32_t)resolved;
+        return true;
+    }
+    return false;
+}
+
+void SortAndUnique(Database &db)
+{
     std::sort(db.labels.begin(), db.labels.end(),
               [](const Label &a, const Label &b) {
                   if (a.virtual_address != b.virtual_address) {
                       return a.virtual_address < b.virtual_address;
+                  }
+                  const int as = source_priority(a.source);
+                  const int bs = source_priority(b.source);
+                  if (as != bs) {
+                      return as < bs;
                   }
                   const int ap = type_priority(a.type);
                   const int bp = type_priority(b.type);
@@ -516,21 +718,31 @@ bool Build(const std::vector<uint8_t> &file, Database &db, std::string &error)
                   if (a.type != b.type) {
                       return (int)a.type < (int)b.type;
                   }
-                  return a.name < b.name;
+                  if (a.name != b.name) {
+                      return a.name < b.name;
+                  }
+                  return confidence_priority(a.confidence) <
+                         confidence_priority(b.confidence);
               });
     db.labels.erase(
         std::unique(db.labels.begin(), db.labels.end(),
                     [](const Label &a, const Label &b) {
                         return a.virtual_address == b.virtual_address &&
-                               a.type == b.type && a.name == b.name;
+                               a.type == b.type && a.source == b.source &&
+                               a.name == b.name;
                     }),
         db.labels.end());
+}
 
-    if (db.labels.empty()) {
-        error = "default.xbe parsed but produced no useful labels.";
-        return false;
-    }
-    return true;
+void Append(Database &db, const std::vector<Label> &labels)
+{
+    db.labels.insert(db.labels.end(), labels.begin(), labels.end());
+}
+
+void Merge(Database &db, const std::vector<Label> &labels)
+{
+    Append(db, labels);
+    SortAndUnique(db);
 }
 
 const Label *PrimaryAt(const Database &db, uint32_t virtual_address)

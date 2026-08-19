@@ -14,9 +14,12 @@
 #include "exec/target_page.h"
 #include "hw/boards.h"
 #include "qemu/cutils.h"
+#include "qemu/atomic.h"
 #include "system/address-spaces.h"
 #include "system/hw_accel.h"
 #include "system/memory.h"
+#include "system/memory_mapping.h"
+#include "qapi/error.h"
 #include "system/runstate.h"
 #include "system/cpus.h"
 #include "exec/gdbstub.h"
@@ -67,18 +70,46 @@ int xemu_cheat_memory_write(int is_virtual, uint32_t address,
                                buffer, size) == MEMTX_OK;
 }
 
+static uint64_t xemu_cheat_code_patch_generation_value;
+
+uint64_t xemu_cheat_code_patch_generation(void)
+{
+    return qatomic_read(&xemu_cheat_code_patch_generation_value);
+}
+
+void xemu_cheat_notify_code_patch(void)
+{
+    qatomic_inc(&xemu_cheat_code_patch_generation_value);
+}
+
 int xemu_cheat_patch_virtual(uint32_t address, const void *buffer, size_t size)
 {
+    CPUState *cpu = qemu_get_cpu(0);
     int ok;
     const bool was_running = runstate_is_running();
 
-    if (buffer == NULL || size == 0) {
+    if (cpu == NULL || buffer == NULL || size == 0) {
         return 0;
     }
-    if (was_running) {
-        vm_stop(RUN_STATE_PAUSED);
+    if (was_running && vm_stop(RUN_STATE_PAUSED) != 0) {
+        return 0;
     }
-    ok = xemu_cheat_memory_write(1, address, buffer, size);
+
+    /* WHPX/KVM/HVF keep architectural state in accelerator-private storage
+     * while the vCPU runs. Synchronize after the stop so cpu_memory_rw_debug()
+     * translates the virtual patch through the current guest CR3. */
+    cpu_synchronize_state(cpu);
+    ok = cpu_memory_rw_debug(cpu, (vaddr)address, (void *)buffer, size, true) == 0;
+    if (ok) {
+        /* A virtual instruction edit is more than an ordinary cheat-data
+         * write. Force the backend's translation/code-fetch synchronization
+         * before the guest can resume. The helper is deliberately best-effort
+         * for accelerators without an explicit flush implementation: the write
+         * itself keeps its historical success semantics. */
+        xemu_cheat_notify_code_patch();
+        (void)xemu_dbg_flush_guest_translation();
+    }
+
     if (was_running) {
         vm_start();
     }
@@ -137,6 +168,113 @@ int xemu_cheat_virtual_to_physical(uint32_t address, uint64_t *physical_address)
 {
     return xemu_cheat_virtual_to_physical_cpu(qemu_get_cpu(0), address,
                                                physical_address);
+}
+
+static int xemu_cheat_virtual_mapping_compare(const void *lhs, const void *rhs)
+{
+    const XemuCheatVirtualMapping *a = lhs;
+    const XemuCheatVirtualMapping *b = rhs;
+
+    if (a->virtual_start < b->virtual_start) {
+        return -1;
+    }
+    if (a->virtual_start > b->virtual_start) {
+        return 1;
+    }
+    if (a->physical_start < b->physical_start) {
+        return -1;
+    }
+    if (a->physical_start > b->physical_start) {
+        return 1;
+    }
+    return 0;
+}
+
+int xemu_cheat_collect_ram_virtual_mappings(
+    uint64_t ram_size, XemuCheatVirtualMapping **mappings, size_t *count)
+{
+    CPUState *cpu = qemu_get_cpu(0);
+    MemoryMappingList list;
+    MemoryMapping *mapping;
+    XemuCheatVirtualMapping *result = NULL;
+    size_t result_count = 0;
+    Error *local_err = NULL;
+
+    if (mappings == NULL || count == NULL || cpu == NULL ||
+        ram_size == 0 || ram_size > UINT32_MAX) {
+        return 0;
+    }
+    *mappings = NULL;
+    *count = 0;
+
+    /* The accelerator CPU state must be synchronized before the generic x86
+     * page-table walker reads CR3/CR4, just like the single-address path. */
+    cpu_synchronize_state(cpu);
+    memory_mapping_list_init(&list);
+    if (!cpu_get_memory_mapping(cpu, &list, &local_err)) {
+        if (local_err != NULL) {
+            error_free(local_err);
+        }
+        memory_mapping_list_free(&list);
+        return 0;
+    }
+
+    /* cpu_get_memory_mapping() already tells us the maximum number of list
+     * entries. Allocate once instead of growing the result one element at a
+     * time with g_renew(); invalid/MMIO entries are simply skipped below. */
+    if (list.num != 0) {
+        result = g_new(XemuCheatVirtualMapping, list.num);
+    }
+
+    QTAILQ_FOREACH(mapping, &list.head, next) {
+        uint64_t physical_start = (uint64_t)mapping->phys_addr;
+        uint64_t virtual_start = (uint64_t)mapping->virt_addr;
+        uint64_t length = (uint64_t)mapping->length;
+        uint64_t max_virtual_length;
+        uint64_t max_physical_length;
+
+        /* Our Xbox debugger exposes the 32-bit guest virtual address space and
+         * only RAM-backed mappings. Ignore MMIO and mappings outside installed
+         * RAM, matching the old per-page filter. */
+        if (length == 0 || virtual_start > UINT32_MAX ||
+            physical_start >= ram_size) {
+            continue;
+        }
+        max_virtual_length = 0x100000000ULL - virtual_start;
+        max_physical_length = ram_size - physical_start;
+        if (length > max_virtual_length) {
+            length = max_virtual_length;
+        }
+        if (length > max_physical_length) {
+            length = max_physical_length;
+        }
+        if (length == 0) {
+            continue;
+        }
+
+        result[result_count].virtual_start = (uint32_t)virtual_start;
+        result[result_count].physical_start = physical_start;
+        result[result_count].length = length;
+        result_count++;
+    }
+    memory_mapping_list_free(&list);
+
+    if (result_count == 0) {
+        g_free(result);
+        result = NULL;
+    }
+    if (result_count > 1) {
+        qsort(result, result_count, sizeof(*result),
+              xemu_cheat_virtual_mapping_compare);
+    }
+    *mappings = result;
+    *count = result_count;
+    return 1;
+}
+
+void xemu_cheat_free_virtual_mappings(XemuCheatVirtualMapping *mappings)
+{
+    g_free(mappings);
 }
 
 static int xemu_cheat_find_gdb_register(const GArray *register_list,
@@ -471,6 +609,175 @@ int xemu_cheat_disassembler_available(void)
 #endif
 }
 
+#ifdef CONFIG_CAPSTONE
+typedef struct XemuCheatDisasmContext {
+    csh handle;
+    cs_insn *insn;
+    uint8_t *paired_page_bytes[2];
+    uint8_t *page_bytes;
+    size_t page_size;
+} XemuCheatDisasmContext;
+
+static void xemu_cheat_disasm_context_free(gpointer opaque)
+{
+    XemuCheatDisasmContext *context = opaque;
+
+    if (context == NULL) {
+        return;
+    }
+    g_free(context->paired_page_bytes[0]);
+    g_free(context->paired_page_bytes[1]);
+    g_free(context->page_bytes);
+    if (context->insn != NULL) {
+        cs_free(context->insn, 1);
+    }
+    if (context->handle != 0) {
+        cs_close(&context->handle);
+    }
+    g_free(context);
+}
+
+/* Disassembly requests come from the UI/debugger path today, but keep the
+ * decoder state thread-local rather than assuming that remains true forever.
+ * Each calling thread pays cs_open()/cs_malloc() and page-buffer allocation
+ * once, then reuses that state for subsequent refreshes and helper decodes. */
+static GPrivate xemu_cheat_disasm_context_private =
+    G_PRIVATE_INIT(xemu_cheat_disasm_context_free);
+
+static XemuCheatDisasmContext *xemu_cheat_disasm_context_get(
+    size_t page_size, int *error_result)
+{
+    XemuCheatDisasmContext *context =
+        g_private_get(&xemu_cheat_disasm_context_private);
+
+    *error_result = XEMU_CHEAT_DISAS_ERROR;
+    if (context == NULL) {
+        cs_err err;
+
+        context = g_new0(XemuCheatDisasmContext, 1);
+        err = cs_open(CS_ARCH_X86, CS_MODE_32, &context->handle);
+        if (err != CS_ERR_OK) {
+            g_free(context);
+            *error_result = XEMU_CHEAT_DISAS_NO_BACKEND;
+            return NULL;
+        }
+        cs_option(context->handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+        cs_option(context->handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+        context->insn = cs_malloc(context->handle);
+        if (context->insn == NULL) {
+            cs_close(&context->handle);
+            g_free(context);
+            return NULL;
+        }
+        g_private_set(&xemu_cheat_disasm_context_private, context);
+    }
+
+    /* TARGET_PAGE_SIZE is runtime-variable in generic QEMU builds. Grow or
+     * resize the reusable scratch buffers if that size ever changes. */
+    if (context->page_size != page_size) {
+        context->paired_page_bytes[0] =
+            g_realloc(context->paired_page_bytes[0], page_size);
+        context->paired_page_bytes[1] =
+            g_realloc(context->paired_page_bytes[1], page_size);
+        context->page_bytes = g_realloc(context->page_bytes, page_size);
+        context->page_size = page_size;
+    }
+    return context;
+}
+
+typedef struct XemuCheatDisasmPageCache {
+    uint32_t page_base;
+    uint64_t physical_base;
+    uint8_t *bytes;
+    uint8_t valid;
+    uint8_t physical_valid;
+} XemuCheatDisasmPageCache;
+
+static int xemu_cheat_disasm_load_page(CPUState *cpu, uint32_t page_base,
+                                       XemuCheatDisasmPageCache *cache)
+{
+    uint64_t physical = 0;
+
+    if (cache->valid && cache->page_base == page_base) {
+        return 1;
+    }
+    if (cache->bytes == NULL) {
+        return 0;
+    }
+
+    /* Keep the backing page buffer for the lifetime of the paired
+     * disassembly call.  Only invalidate the metadata when this cache slot
+     * is replaced; clearing the whole struct would discard bytes. */
+    cache->valid = 0;
+    cache->physical_valid = 0;
+    cache->physical_base = 0;
+    cache->page_base = page_base;
+    if (cpu_memory_rw_debug(cpu, (vaddr)page_base, cache->bytes,
+                            TARGET_PAGE_SIZE, false) != 0) {
+        return 0;
+    }
+    cache->valid = 1;
+    if (xemu_cheat_virtual_to_physical_cpu(cpu, page_base, &physical)) {
+        cache->physical_base = physical;
+        cache->physical_valid = 1;
+    }
+    return 1;
+}
+
+static XemuCheatDisasmPageCache *xemu_cheat_disasm_get_page(
+    CPUState *cpu, uint32_t page_base, XemuCheatDisasmPageCache caches[2],
+    unsigned *replacement)
+{
+    unsigned i;
+
+    for (i = 0; i < 2; ++i) {
+        if (caches[i].valid && caches[i].page_base == page_base) {
+            return &caches[i];
+        }
+    }
+    i = *replacement & 1u;
+    *replacement = (*replacement + 1u) & 1u;
+    if (!xemu_cheat_disasm_load_page(cpu, page_base, &caches[i])) {
+        return NULL;
+    }
+    return &caches[i];
+}
+
+/* Build the <=15-byte x86 decode window from page-sized cached reads.  The
+ * old implementation performed up to fifteen cpu_memory_rw_debug() calls per
+ * instruction; this keeps identical partial-window semantics at an unmapped
+ * page boundary while normally reading each 4 KiB page only once. */
+static size_t xemu_cheat_disasm_window(
+    CPUState *cpu, uint64_t pc, uint8_t code[15],
+    XemuCheatDisasmPageCache caches[2], unsigned *replacement,
+    uint64_t *physical, int *physical_valid)
+{
+    size_t available = 0;
+
+    *physical = 0;
+    *physical_valid = 0;
+    while (available < 15 && pc + available <= UINT32_MAX) {
+        uint32_t address = (uint32_t)(pc + available);
+        uint32_t page_base = address & (uint32_t)TARGET_PAGE_MASK;
+        size_t page_offset = (size_t)(address - page_base);
+        size_t amount = MIN((size_t)15 - available,
+                            (size_t)TARGET_PAGE_SIZE - page_offset);
+        XemuCheatDisasmPageCache *cache = xemu_cheat_disasm_get_page(
+            cpu, page_base, caches, replacement);
+        if (cache == NULL) {
+            break;
+        }
+        if (available == 0 && cache->physical_valid) {
+            *physical = cache->physical_base + page_offset;
+            *physical_valid = 1;
+        }
+        memcpy(code + available, cache->bytes + page_offset, amount);
+        available += amount;
+    }
+    return available;
+}
+#endif
+
 int xemu_cheat_disassemble_paired(uint32_t address, int instruction_count,
                                   XemuCheatDisasmRow *rows, size_t row_capacity,
                                   size_t *row_count)
@@ -487,54 +794,48 @@ int xemu_cheat_disassemble_paired(uint32_t address, int instruction_count,
 
     cpu_synchronize_state(cpu);
 
-    /* Check the exact starting address separately. This lets the UI report
-     * an unmapped virtual address distinctly from a missing decoder backend. */
+#ifndef CONFIG_CAPSTONE
     {
         uint8_t probe;
         if (cpu_memory_rw_debug(cpu, (vaddr)address, &probe, 1, false) != 0) {
             return XEMU_CHEAT_DISAS_UNMAPPED;
         }
     }
-
-#ifndef CONFIG_CAPSTONE
     return XEMU_CHEAT_DISAS_NO_BACKEND;
 #else
     {
-        csh handle;
-        cs_err err;
         uint64_t pc = address;
         int i;
         size_t produced = 0;
+        const size_t page_size = (size_t)TARGET_PAGE_SIZE;
+        int context_error = XEMU_CHEAT_DISAS_ERROR;
+        XemuCheatDisasmContext *context =
+            xemu_cheat_disasm_context_get(page_size, &context_error);
+        XemuCheatDisasmPageCache caches[2] = {0};
+        unsigned replacement = 0;
 
-        err = cs_open(CS_ARCH_X86, CS_MODE_32, &handle);
-        if (err != CS_ERR_OK) {
-            return XEMU_CHEAT_DISAS_NO_BACKEND;
+        if (context == NULL) {
+            return context_error;
         }
-
-        cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
-        cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+        caches[0].bytes = context->paired_page_bytes[0];
+        caches[1].bytes = context->paired_page_bytes[1];
 
         for (i = 0; i < instruction_count && produced < row_capacity &&
-                    pc <= 0xFFFFFFFFull; ++i) {
+                    pc <= UINT32_MAX; ++i) {
             uint8_t code[15];
-            size_t available = 0;
-            size_t j;
-            cs_insn *insn = NULL;
-            size_t decoded;
-            XemuCheatDisasmRow *row = &rows[produced];
             uint64_t physical = 0;
-
-            for (j = 0; j < sizeof(code) && pc + j <= 0xFFFFFFFFull; ++j) {
-                if (cpu_memory_rw_debug(cpu, (vaddr)(pc + j),
-                                        &code[j], 1, false) != 0) {
-                    break;
-                }
-                ++available;
-            }
+            int physical_valid = 0;
+            size_t available = xemu_cheat_disasm_window(
+                cpu, pc, code, caches, &replacement,
+                &physical, &physical_valid);
+            XemuCheatDisasmRow *row = &rows[produced];
+            const uint8_t *cursor;
+            size_t remaining;
+            uint64_t iter_pc;
+            bool decoded;
 
             if (available == 0) {
                 if (i == 0) {
-                    cs_close(&handle);
                     return XEMU_CHEAT_DISAS_UNMAPPED;
                 }
                 break;
@@ -542,38 +843,37 @@ int xemu_cheat_disassemble_paired(uint32_t address, int instruction_count,
 
             memset(row, 0, sizeof(*row));
             row->virtual_address = (uint32_t)pc;
-            if (xemu_cheat_virtual_to_physical_cpu(cpu, (uint32_t)pc,
-                                                    &physical)) {
+            if (physical_valid) {
                 row->physical_address = physical;
                 row->physical_valid = 1;
             }
 
-            decoded = cs_disasm(handle, code, available, pc, 1, &insn);
-            if (decoded == 0 || insn == NULL || insn[0].size == 0) {
+            cursor = code;
+            remaining = available;
+            iter_pc = pc;
+            decoded = cs_disasm_iter(context->handle, &cursor, &remaining,
+                                     &iter_pc, context->insn);
+            if (!decoded || context->insn->size == 0 ||
+                context->insn->size > available) {
                 row->size = 1;
                 row->bytes[0] = code[0];
                 g_strlcpy(row->mnemonic, "db", sizeof(row->mnemonic));
                 g_snprintf(row->operands, sizeof(row->operands),
                            "0x%02X", code[0]);
                 ++pc;
-                if (insn != NULL) {
-                    cs_free(insn, decoded);
-                }
             } else {
-                row->size = (uint8_t)MIN(insn[0].size, sizeof(row->bytes));
-                memcpy(row->bytes, insn[0].bytes, row->size);
-                g_strlcpy(row->mnemonic, insn[0].mnemonic,
+                row->size = (uint8_t)MIN(context->insn->size,
+                                         sizeof(row->bytes));
+                memcpy(row->bytes, context->insn->bytes, row->size);
+                g_strlcpy(row->mnemonic, context->insn->mnemonic,
                           sizeof(row->mnemonic));
-                g_strlcpy(row->operands, insn[0].op_str,
+                g_strlcpy(row->operands, context->insn->op_str,
                           sizeof(row->operands));
-                pc += insn[0].size;
-                cs_free(insn, decoded);
+                pc += context->insn->size;
             }
-
             ++produced;
         }
 
-        cs_close(&handle);
         *row_count = produced;
         return produced != 0 ? XEMU_CHEAT_DISAS_OK
                              : XEMU_CHEAT_DISAS_ERROR;
@@ -581,14 +881,12 @@ int xemu_cheat_disassemble_paired(uint32_t address, int instruction_count,
 #endif
 }
 
-
 int xemu_cheat_disassemble_page(uint32_t address, XemuCheatDisasmRow *rows,
                                 size_t row_capacity, size_t *row_count)
 {
     CPUState *cpu = qemu_get_cpu(0);
     const uint32_t page_base = address & (uint32_t)TARGET_PAGE_MASK;
     const size_t page_size = (size_t)TARGET_PAGE_SIZE;
-    uint8_t *page_bytes;
 
     if (row_count != NULL) {
         *row_count = 0;
@@ -599,92 +897,85 @@ int xemu_cheat_disassemble_page(uint32_t address, XemuCheatDisasmRow *rows,
 
     cpu_synchronize_state(cpu);
 
-    page_bytes = g_malloc(page_size);
-    if (page_bytes == NULL) {
-        return XEMU_CHEAT_DISAS_ERROR;
-    }
-    if (cpu_memory_rw_debug(cpu, (vaddr)page_base, page_bytes,
-                            page_size, false) != 0) {
-        g_free(page_bytes);
-        return XEMU_CHEAT_DISAS_UNMAPPED;
-    }
-
 #ifndef CONFIG_CAPSTONE
-    g_free(page_bytes);
+    {
+        uint8_t *page_bytes = g_malloc(page_size);
+        int read_ok = cpu_memory_rw_debug(cpu, (vaddr)page_base, page_bytes,
+                                          page_size, false) == 0;
+        g_free(page_bytes);
+        if (!read_ok) {
+            return XEMU_CHEAT_DISAS_UNMAPPED;
+        }
+    }
     return XEMU_CHEAT_DISAS_NO_BACKEND;
 #else
     {
-        csh handle;
-        cs_err err;
+        int context_error = XEMU_CHEAT_DISAS_ERROR;
+        XemuCheatDisasmContext *context =
+            xemu_cheat_disasm_context_get(page_size, &context_error);
         size_t offset = 0;
         size_t produced = 0;
+        uint64_t physical_page = 0;
+        int physical_page_valid;
 
-        err = cs_open(CS_ARCH_X86, CS_MODE_32, &handle);
-        if (err != CS_ERR_OK) {
-            g_free(page_bytes);
-            return XEMU_CHEAT_DISAS_NO_BACKEND;
+        if (context == NULL) {
+            return context_error;
         }
-
-        cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
-        cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+        if (cpu_memory_rw_debug(cpu, (vaddr)page_base, context->page_bytes,
+                                page_size, false) != 0) {
+            return XEMU_CHEAT_DISAS_UNMAPPED;
+        }
+        physical_page_valid =
+            xemu_cheat_virtual_to_physical_cpu(cpu, page_base,
+                                                &physical_page);
 
         while (offset < page_size && produced < row_capacity) {
             const uint64_t pc = (uint64_t)page_base + offset;
             const size_t available = MIN((size_t)15, page_size - offset);
-            cs_insn *insn = NULL;
-            size_t decoded;
             XemuCheatDisasmRow *row = &rows[produced];
-            uint64_t physical = 0;
+            const uint8_t *cursor = context->page_bytes + offset;
+            size_t remaining = available;
+            uint64_t iter_pc = pc;
+            bool decoded;
 
             memset(row, 0, sizeof(*row));
             row->virtual_address = (uint32_t)pc;
-            if (xemu_cheat_virtual_to_physical_cpu(cpu, (uint32_t)pc,
-                                                    &physical)) {
-                row->physical_address = physical;
+            if (physical_page_valid) {
+                row->physical_address = physical_page + offset;
                 row->physical_valid = 1;
             }
 
-            decoded = cs_disasm(handle, page_bytes + offset, available,
-                                pc, 1, &insn);
-
+            decoded = cs_disasm_iter(context->handle, &cursor, &remaining,
+                                     &iter_pc, context->insn);
             /* The page start is not guaranteed to be an x86 instruction
-             * boundary. Never let a speculative decode cross over the exact
-             * requested focus address; resynchronize there so breakpoint EIP
-             * always appears as its own exact row. */
-            if (decoded != 0 && insn != NULL && insn[0].size != 0 &&
-                pc < address && pc + insn[0].size > address) {
-                cs_free(insn, decoded);
-                insn = NULL;
-                decoded = 0;
+             * boundary. Never let a speculative decode cross the exact focus
+             * address; resynchronize there exactly as the previous path did. */
+            if (decoded && context->insn->size != 0 &&
+                pc < address && pc + context->insn->size > address) {
+                decoded = false;
             }
 
-            if (decoded == 0 || insn == NULL || insn[0].size == 0 ||
-                insn[0].size > available) {
+            if (!decoded || context->insn->size == 0 ||
+                context->insn->size > available) {
                 row->size = 1;
-                row->bytes[0] = page_bytes[offset];
+                row->bytes[0] = context->page_bytes[offset];
                 g_strlcpy(row->mnemonic, "db", sizeof(row->mnemonic));
                 g_snprintf(row->operands, sizeof(row->operands),
-                           "0x%02X", page_bytes[offset]);
+                           "0x%02X", context->page_bytes[offset]);
                 ++offset;
-                if (insn != NULL) {
-                    cs_free(insn, decoded);
-                }
             } else {
-                row->size = (uint8_t)MIN(insn[0].size, sizeof(row->bytes));
-                memcpy(row->bytes, insn[0].bytes, row->size);
-                g_strlcpy(row->mnemonic, insn[0].mnemonic,
+                row->size = (uint8_t)MIN(context->insn->size,
+                                         sizeof(row->bytes));
+                memcpy(row->bytes, context->insn->bytes, row->size);
+                g_strlcpy(row->mnemonic, context->insn->mnemonic,
                           sizeof(row->mnemonic));
-                g_strlcpy(row->operands, insn[0].op_str,
+                g_strlcpy(row->operands, context->insn->op_str,
                           sizeof(row->operands));
-                offset += insn[0].size;
-                cs_free(insn, decoded);
+                offset += context->insn->size;
             }
-
             ++produced;
         }
 
-        cs_close(&handle);
-        g_free(page_bytes);
         *row_count = produced;
         return produced != 0 ? XEMU_CHEAT_DISAS_OK
                              : XEMU_CHEAT_DISAS_ERROR;

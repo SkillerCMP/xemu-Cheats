@@ -28,6 +28,7 @@
 #include "compat.hh"
 #include "debug-tools/cheat-engine.hh"
 #include "debug-tools/current-game.hh"
+#include "debug-tools/hdd-directory.hh"
 #include "debug-tools/memory-tools.hh"
 #include "update.hh"
 #include "../xemu-os-utils.h"
@@ -225,6 +226,7 @@ void ShowMainMenu()
             ImGui::MenuItem("Video", NULL, &video_window.m_is_open);
             ImGui::Separator();
             ImGui::MenuItem("Current Game", NULL, &current_game_manager.is_open);
+            ImGui::MenuItem("HDD Directory", NULL, &hdd_directory_window.is_open);
             ImGui::MenuItem("Cheat Engine", NULL, &cheat_engine_window.is_open);
             ImGui::MenuItem("Memory Viewer / Search", NULL, &memory_tools_window.is_open);
 #ifdef CONFIG_RENDERDOC

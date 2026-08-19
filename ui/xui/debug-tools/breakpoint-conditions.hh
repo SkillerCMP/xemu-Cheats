@@ -65,6 +65,3 @@ bool xemu_breakpoint_conditions_parse(
 bool xemu_breakpoint_conditions_evaluate(
     const std::vector<XemuBreakpointCondition> &conditions,
     const XemuCheatX86Registers &regs);
-
-const char *xemu_breakpoint_condition_register_name(
-    XemuBreakpointConditionRegister reg);

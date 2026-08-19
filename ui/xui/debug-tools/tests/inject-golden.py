@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+from source_test_utils import read_memory_tools_implementation
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -19,8 +20,11 @@ def main() -> int:
 
     root = pathlib.Path(args.root).resolve()
     dbg = root / "ui/xui/debug-tools"
-    memory = (dbg / "memory-tools.cc").read_text(encoding="utf-8")
+    memory = read_memory_tools_implementation(dbg)
     bridge = (dbg / "cheat-engine-memory.c").read_text(encoding="utf-8")
+    bridge_h = (dbg / "cheat-engine-memory.h").read_text(encoding="utf-8")
+    external = (dbg / "external-code-memory.c").read_text(encoding="utf-8")
+    backend = (dbg / "backend/xemu-dbg.c").read_text(encoding="utf-8")
     engine = (dbg / "cheat-engine.cc").read_text(encoding="utf-8")
     assembler = (dbg / "x86-cheat-assembler.cc").read_text(encoding="utf-8")
 
@@ -60,10 +64,45 @@ def main() -> int:
     require(bridge, 'vm_stop(RUN_STATE_PAUSED)', "transactional patch pause")
     require(bridge, 'if (was_running) {\n        vm_start();',
             "transactional patch resume")
+    require(bridge, 'cpu_synchronize_state(cpu);',
+            "executable patch current-CR3 synchronization")
+    require(bridge, '(void)xemu_dbg_flush_guest_translation();',
+            "executable patch accelerator translation synchronization")
+    require(bridge, 'xemu_cheat_notify_code_patch();',
+            "executable patch generation notification")
+    require(bridge_h, 'uint64_t xemu_cheat_code_patch_generation(void);',
+            "code patch generation bridge declaration")
+    require(memory, 'code_patch_generation != m_code_patch_generation',
+            "debugger executable-patch generation tracking")
+    require(memory, 'refresh_disassembly = true;',
+            "automatic disassembly invalidation")
+    if external.count('xemu_cheat_notify_code_patch();') < 2:
+        raise AssertionError("external cave write/free paths do not notify debugger refresh")
+
+    require(backend, '#include "exec/tb-flush.h"',
+            "TCG translation-block flush API")
+    require(backend, 'if (!xemu_dbg_pause_for_accel_update(&was_running))',
+            "TCG TB flush serial-context guard")
+    require(backend, 'tlb_flush(cpu);',
+            "TCG software TLB invalidation")
+    require(backend, 'tb_flush__exclusive_or_serial();',
+            "TCG translated-code invalidation")
+    tcg_flush = backend.find('if (tcg_enabled()) {',
+                             backend.find('int xemu_dbg_flush_guest_translation(void)'))
+    if tcg_flush < 0:
+        raise AssertionError("TCG executable-patch synchronization block missing")
+    tcg_end = backend.find('return 1;', tcg_flush)
+    if tcg_end < 0 or backend.find('tlb_flush(cpu);', tcg_flush, tcg_end) < 0 or \
+            backend.find('tb_flush__exclusive_or_serial();', tcg_flush, tcg_end) < 0:
+        raise AssertionError("TCG synchronization must flush both TLB and translated code")
 
     require(engine, 'InstallFHook(kDebuggerFHookOwner, kDebuggerFHookKey',
             "shared Type-F hook installer")
     require(engine, 'ActiveFHookOwnsAddress', "active cave ownership guard")
+    require(engine, 'xemu_cheat_patch_virtual(hook_address, hook,',
+            "F0 hook synchronized executable write")
+    require(engine, 'xemu_cheat_patch_virtual(state.hook_address,',
+            "F0 restore synchronized executable write")
 
     require(assembler, 'target.kind == OperandKind::Label || target.kind == OperandKind::Imm',
             "JMP/CALL direct-address targets")

@@ -17,6 +17,10 @@
 
 #include "xdvdfs-disc.hh"
 #include "xbe-labels.hh"
+#include "label-packs.hh"
+#include "xdk-labels.hh"
+#include "map-labels.hh"
+#include "pdb-labels.hh"
 
 class CurrentGameManager
 {
@@ -43,18 +47,43 @@ public:
     bool is_open = false;
 
     void Refresh(bool force = false);
-    void Draw();
+    void Draw(bool detached = false);
     void DrawInlineSummary(const char *id) const;
 
     const GameInfo &Get() const { return m_info; }
     uint64_t Generation() const { return m_generation; }
     bool HasGame() const { return m_info.valid; }
     const XemuXbeLabels::Database &Labels() const { return m_labels; }
+    uint64_t LabelGeneration() const { return m_label_generation; }
     const XemuXbeLabels::Label *PrimaryLabelAt(uint32_t virtual_address) const
     {
         return XemuXbeLabels::PrimaryAt(m_labels, virtual_address);
     }
     const std::string &LabelStatus() const { return m_label_status; }
+    const std::vector<std::string> &LoadedLabelPacks() const
+    {
+        return m_loaded_label_packs;
+    }
+    const XemuXdkLabels::Status &XdkStatus() const { return m_xdk_status; }
+    const XemuMapLabels::Status &MapStatus() const { return m_map_status; }
+    const std::string &LoadedMapPath() const { return m_loaded_map_path; }
+    const XemuPdbLabels::Status &PdbStatus() const { return m_pdb_status; }
+    const std::string &LoadedPdbPath() const { return m_loaded_pdb_path; }
+    const XemuPdbLabels::Identity &XbePdbIdentity() const { return m_xbe_pdb_identity; }
+
+    std::string LabelRootDirectory() const;
+    std::string LabelPackDirectory() const;
+    std::string LabelXdkDirectory() const;
+    std::string LabelPdbDirectory() const;
+    std::string LabelCacheDirectory() const;
+    std::string SuggestedCurrentLabelPackPath() const;
+    bool EnsureLabelDirectories(std::string &error) const;
+    bool ReloadLabelPacks();
+    bool RefreshXdkLabels(bool rebuild_cache = false);
+    bool LoadMapFile(const std::string &path);
+    bool LoadPdbFile(const std::string &path);
+    bool LoadLabelPackFile(const std::string &path);
+    bool SaveLabelPackFile(const std::string &path);
 
     static std::string FormatTitleId(uint32_t title_id);
     static std::string FormatDatabaseGameId(uint32_t title_id);
@@ -67,15 +96,39 @@ private:
     XemuXdvdfs::Disc m_disc;
     std::string m_disc_status;
     XemuXbeLabels::Database m_labels;
+    uint64_t m_label_generation = 0;
+    XemuXbeLabels::Database m_auto_labels;
+    std::vector<XemuXbeLabels::Label> m_xdk_labels;
+    XemuXdkLabels::Status m_xdk_status;
+    std::vector<XemuXbeLabels::Label> m_map_labels;
+    XemuMapLabels::Status m_map_status;
+    std::string m_loaded_map_path;
+    std::vector<XemuXbeLabels::Label> m_pdb_labels;
+    XemuPdbLabels::Status m_pdb_status;
+    std::string m_loaded_pdb_path;
+    XemuPdbLabels::Identity m_xbe_pdb_identity;
+    std::vector<uint8_t> m_disc_xbe_file;
+    // Exact copy of the last loaded in-memory XBE header block. Refresh()
+    // still rereads the complete block every poll so a revision change cannot
+    // be hidden by a partial fingerprint; identical bytes let us skip the
+    // repeated SHA/title/GameInfo rebuild work. Capacity is retained across
+    // game changes to avoid adding another recurring allocation.
+    std::vector<uint8_t> m_loaded_xbe_headers;
+    bool m_loaded_xbe_derived_valid = false;
+    std::vector<std::string> m_loaded_label_packs;
     std::string m_label_status;
     uintptr_t m_disc_backend_identity = 0;
     int64_t m_disc_image_size = 0;
 
     void RefreshDisc(bool force);
-    void DrawGameInfoTab();
+    void DrawGameInfoTab(bool detached);
     void DrawDiscContentsTab();
     static void DrawDiscEntry(const XemuXdvdfs::Entry &entry);
     static std::string FormatByteSize(uint64_t bytes);
+
+    XemuLabelPacks::Identity CurrentLabelIdentity() const;
+    bool MergeLabelPackText(const std::string &path, const std::string &text,
+                            bool report_mismatch, bool defer_sort = false);
 
     static bool SameIdentity(const GameInfo &a, const GameInfo &b);
 };

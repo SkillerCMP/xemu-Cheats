@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+from source_test_utils import read_memory_tools_implementation
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -19,7 +20,7 @@ def main() -> int:
 
     root = pathlib.Path(args.root).resolve()
     dbg = root / "ui/xui/debug-tools"
-    memory = (dbg / "memory-tools.cc").read_text(encoding="utf-8")
+    memory = read_memory_tools_implementation(dbg)
     header = (dbg / "memory-tools.hh").read_text(encoding="utf-8")
 
     require(header, "void DumpPhysicalRam();", "physical dump entry point")

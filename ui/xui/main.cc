@@ -198,6 +198,27 @@ void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip)
     g_flip_req = flip;
 }
 
+int xemu_hud_is_detached_window_id(SDL_WindowID window_id)
+{
+    return detached_tools_owns_window_id(window_id) ? 1 : 0;
+}
+
+void xemu_hud_render_playback_only(void)
+{
+    if (first_boot_window.is_open) {
+        return;
+    }
+
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSizeInPixels(xemu_get_window(), &width, &height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    RenderFramebuffer(g_tex, width, height, g_flip_req);
+}
+
 void xemu_hud_update(void)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -322,7 +343,6 @@ void xemu_hud_update(void)
     monitor_window.Draw();
     apu_window.Draw();
     video_window.Draw();
-    current_game_manager.Draw();
     compatibility_reporter_window.Draw();
 #if defined(_WIN32)
     update_window.Draw();
@@ -331,7 +351,7 @@ void xemu_hud_update(void)
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();
 
-    // Build the two detached debugger tool frames after the main UI has had a
+    // Build the detached Debug Tools frames after the main UI has had a
     // chance to toggle them from the Debug menu. The helper restores the main
     // ImGui/OpenGL contexts before returning.
     detached_tools_build_frames();
@@ -345,7 +365,7 @@ void xemu_hud_render()
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    // Render and swap the independent Cheat Engine and Memory Viewer windows,
+    // Render and swap the independent Debug Tools windows,
     // then restore the emulator's main OpenGL/ImGui contexts.
     detached_tools_render_frames();
 

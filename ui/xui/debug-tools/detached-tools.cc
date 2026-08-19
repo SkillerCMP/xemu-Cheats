@@ -13,6 +13,8 @@
 
 #include "../common.hh"
 #include "cheat-engine.hh"
+#include "current-game.hh"
+#include "hdd-directory.hh"
 #include "memory-tools.hh"
 
 #include <cstdio>
@@ -50,6 +52,16 @@ void DrawMemoryTools()
     memory_tools_window.Draw(true);
 }
 
+void DrawCurrentGame()
+{
+    current_game_manager.Draw(true);
+}
+
+void DrawHddDirectory()
+{
+    hdd_directory_window.Draw(true);
+}
+
 DetachedToolWindow g_cheat_tool = {
     "xemu - RAW Cheat Engine",
     980, 760,
@@ -66,9 +78,27 @@ DetachedToolWindow g_memory_tool = {
     DrawMemoryTools,
 };
 
+DetachedToolWindow g_current_game_tool = {
+    "xemu - Current Game",
+    900, 620,
+    700, 480,
+    &current_game_manager.is_open,
+    DrawCurrentGame,
+};
+
+DetachedToolWindow g_hdd_tool = {
+    "xemu - Xbox HDD Directory",
+    1100, 760,
+    760, 520,
+    &hdd_directory_window.is_open,
+    DrawHddDirectory,
+};
+
 DetachedToolWindow *g_tools[] = {
     &g_cheat_tool,
     &g_memory_tool,
+    &g_current_game_tool,
+    &g_hdd_tool,
 };
 
 void EnsureDesktopCursor(DetachedToolWindow &tool)
@@ -368,6 +398,20 @@ bool detached_tools_process_sdl_event(SDL_Event *event)
 
     if (g_main_imgui_context) {
         ImGui::SetCurrentContext(g_main_imgui_context);
+    }
+    return false;
+}
+
+bool detached_tools_owns_window_id(SDL_WindowID window_id)
+{
+    if (!window_id) {
+        return false;
+    }
+
+    for (DetachedToolWindow *tool : g_tools) {
+        if (tool->window && SDL_GetWindowID(tool->window) == window_id) {
+            return true;
+        }
     }
     return false;
 }

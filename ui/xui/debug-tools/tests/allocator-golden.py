@@ -6,21 +6,7 @@ import argparse
 import pathlib
 import subprocess
 import tempfile
-
-
-def extract_function(text: str, marker: str) -> str:
-    start = text.index(marker)
-    brace = text.index("{", start)
-    depth = 0
-    for i in range(brace, len(text)):
-        ch = text[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    raise ValueError(f"unterminated function: {marker}")
+from source_test_utils import extract_function
 
 
 def main() -> int:

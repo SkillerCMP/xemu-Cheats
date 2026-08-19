@@ -241,32 +241,3 @@ bool xemu_breakpoint_conditions_evaluate(
     }
     return true;
 }
-
-const char *xemu_breakpoint_condition_register_name(
-    XemuBreakpointConditionRegister reg)
-{
-    switch (reg) {
-    case XemuBreakpointConditionRegister::EAX: return "EAX";
-    case XemuBreakpointConditionRegister::EBX: return "EBX";
-    case XemuBreakpointConditionRegister::ECX: return "ECX";
-    case XemuBreakpointConditionRegister::EDX: return "EDX";
-    case XemuBreakpointConditionRegister::ESI: return "ESI";
-    case XemuBreakpointConditionRegister::EDI: return "EDI";
-    case XemuBreakpointConditionRegister::ESP: return "ESP";
-    case XemuBreakpointConditionRegister::EBP: return "EBP";
-    case XemuBreakpointConditionRegister::EIP: return "EIP";
-    case XemuBreakpointConditionRegister::PC: return "PC";
-    case XemuBreakpointConditionRegister::EFLAGS: return "EFLAGS";
-    case XemuBreakpointConditionRegister::CR0: return "CR0";
-    case XemuBreakpointConditionRegister::CR2: return "CR2";
-    case XemuBreakpointConditionRegister::CR3: return "CR3";
-    case XemuBreakpointConditionRegister::CR4: return "CR4";
-    case XemuBreakpointConditionRegister::CS: return "CS";
-    case XemuBreakpointConditionRegister::DS: return "DS";
-    case XemuBreakpointConditionRegister::ES: return "ES";
-    case XemuBreakpointConditionRegister::FS: return "FS";
-    case XemuBreakpointConditionRegister::GS: return "GS";
-    case XemuBreakpointConditionRegister::SS: return "SS";
-    }
-    return "?";
-}

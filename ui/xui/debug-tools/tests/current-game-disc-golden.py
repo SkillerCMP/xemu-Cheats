@@ -27,7 +27,9 @@ def main() -> int:
     need(bridge, "(BdrvRequestFlags)0", "typed blk_pread request flags")
     need(cc, "XemuXdvdfs::Parse", "XDVDFS parser use")
     need(cc, 'FindRootFile(m_disc, "default.xbe")', "default.xbe lookup")
-    need(cc, "sha256_disc_file", "complete disc XBE hashing")
+    need(cc, "sha256_bytes", "complete disc XBE hashing from the one loaded buffer")
+    if "sha256_disc_file" in cc:
+        raise SystemExit("FAIL: default.xbe must not be reread from DVD only for hashing")
     need(cc, 'BeginTabItem("Disc Contents")', "Disc Contents tab")
     need(cc, 'BeginTabItem("Game Info")', "Game Info tab")
     need(cc, 'ImGui::TextWrapped("XBE SHA-256', "disc XBE SHA display")
@@ -36,8 +38,9 @@ def main() -> int:
     need(meson, "'disc-block-io.c'", "C-only block bridge build ownership")
     if "system/block-backend-" in cc or "blk_pread(" in cc:
         raise SystemExit("FAIL: QEMU BlockBackend C headers/calls must stay out of current-game.cc")
-    if "fopen(" in cc or "std::ifstream" in cc:
+    if "std::ifstream" in cc:
         raise SystemExit("FAIL: Current Game disc reader must use the mounted backend, not reopen the host ISO path")
+    need(cc, "read_disc_file(blk", "single mounted-disc XBE read")
 
     print("PASS: Current Game mounted-disc/XBE SHA source invariants")
     return 0

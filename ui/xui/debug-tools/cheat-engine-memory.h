@@ -70,9 +70,15 @@ int xemu_cheat_memory_read(int is_virtual, uint32_t address,
                            void *buffer, size_t size);
 int xemu_cheat_memory_write(int is_virtual, uint32_t address,
                             const void *buffer, size_t size);
-/* Transactional debugger injection write: pause a running guest, patch the
- * virtual instruction bytes, then resume only if it was running beforehand. */
+/* Transactional executable-code write: pause a running guest, synchronize the
+ * accelerator-backed CPU state, patch the virtual instruction bytes, force a
+ * guest translation/code-fetch synchronization, then resume only if this
+ * helper paused the VM. F0 hooks and debugger Inject operations use this path. */
 int xemu_cheat_patch_virtual(uint32_t address, const void *buffer, size_t size);
+/* Monotonic notification used by the x86 debugger to invalidate a displayed
+ * disassembly when executable bytes/caves change outside the debugger pane. */
+uint64_t xemu_cheat_code_patch_generation(void);
+void xemu_cheat_notify_code_patch(void);
 uint64_t xemu_cheat_ram_size(void);
 
 /* Type-F external x86 code-cave storage. The backing pages are outside the
@@ -94,6 +100,21 @@ void xemu_cheat_external_code_reset_allocations(void);
 int xemu_cheat_prepare_virtual_map(void);
 /* Translate one guest virtual address. Returns 0 when unmapped. */
 int xemu_cheat_virtual_to_physical(uint32_t address, uint64_t *physical_address);
+
+/* Point-in-time snapshot of the guest page tables, restricted to installed Xbox
+ * RAM. Unlike probing all 1,048,576 4 KiB virtual pages individually, this
+ * walks the active x86 paging structures once and returns contiguous mappings.
+ * The caller owns *mappings and must release it with
+ * xemu_cheat_free_virtual_mappings(). */
+typedef struct XemuCheatVirtualMapping {
+    uint32_t virtual_start;
+    uint64_t physical_start;
+    uint64_t length;
+} XemuCheatVirtualMapping;
+
+int xemu_cheat_collect_ram_virtual_mappings(
+    uint64_t ram_size, XemuCheatVirtualMapping **mappings, size_t *count);
+void xemu_cheat_free_virtual_mappings(XemuCheatVirtualMapping *mappings);
 int xemu_cheat_get_executable_dir(char *buffer, size_t buffer_size);
 
 /* Xbox x86 debugger helpers. Execute breakpoints are guest virtual addresses. */

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 /* Defined by cheat-engine-memory.h.  Only a reference appears in this
@@ -30,6 +31,7 @@ public:
 
     struct FTempBankInfo {
         std::string cheat_name;
+        std::string display_name;
         uint32_t hook_address = 0;
         uint32_t cave_address = 0;
         uint32_t cave_size = 0;
@@ -49,7 +51,7 @@ public:
 
     void Draw(bool detached = false);
     void Tick();
-    void GetActiveF0TempBanks(std::vector<FTempBankInfo> &out) const;
+    const std::vector<FTempBankInfo> &GetActiveF0TempBanks() const;
 
     /* x86 Debugger Inject > CodeCave uses the exact Type-F0 assembler,
      * allocator, hook sizing, rollback, and cave retirement rules as the
@@ -75,6 +77,20 @@ private:
          * one logical RawCode makes D/E and Type-9 scopes treat a complete
          * external cave as one command instead of counting source lines. */
         std::vector<XemuCheatAsmLine> f_body;
+        /* Parse-time Type-F probe cache. The final F0 still assembles once at
+         * its allocator-selected cave address, but steady ticks never rebuild
+         * the source signature or repeat the address-independent probe. */
+        bool f_precompiled = false;
+        bool f_precompile_ok = false;
+        std::vector<uint8_t> f_probe_code;
+        std::vector<uint8_t> f_probe_data;
+        bool f_uses_preserve = false;
+        uint32_t f_preserve_bytes = 0;
+        bool f_uses_temp = false;
+        uint32_t f_temp_bytes = 0;
+        std::string f_definition_signature;
+        std::string f_precompile_error;
+        int f_precompile_error_line = 0;
         bool f_terminated = false;
         /* F1 uses DEADCODE 000000NN, where NN=01..08 is the number of
          * meaningful bytes in the final padded 8-byte raw line. F0 leaves
@@ -131,6 +147,10 @@ private:
         uint32_t temp_size = 0;
         bool installed = false;
         bool retired_may_be_referenced = false;
+        bool resume_points_valid = false;
+        std::vector<uint32_t> resume_points;
+        uint8_t retire_backoff_ticks = 0;
+        uint8_t retire_skip_ticks = 0;
         std::vector<uint8_t> original_bytes;
         std::string definition_signature;
     };
@@ -150,7 +170,18 @@ private:
     uint64_t m_seen_game_generation = UINT64_MAX;
     std::unordered_map<uint64_t, SwitchState> m_switches;
     std::unordered_map<uint64_t, FHookState> m_f_hooks;
+    /* A disabled/replaced F0 may still be executing in its old cave (or have
+     * a saved resume EIP pending into it). Detach those allocations from the hook
+     * owner so a different F0 can immediately reuse the same guest hook while
+     * the old cave is reclaimed asynchronously once it is no longer live. */
+    std::vector<FHookState> m_retired_f_hooks;
+    /* The debugger draws F0 T-register banks every frame, while hook state
+     * normally changes only on enable/disable/reload. Cache the sorted display
+     * metadata and invalidate it only when active hook ownership changes. */
+    mutable std::vector<FTempBankInfo> m_f_temp_bank_cache;
+    mutable bool m_f_temp_bank_cache_dirty = true;
     std::vector<uint64_t> m_active_f_hooks_scratch;
+    std::vector<std::pair<size_t, uint64_t>> m_f_deactivate_scratch;
     std::vector<AddressContext> m_address_context_scratch;
 
     static constexpr uint64_t kDebuggerFHookKey = UINT64_MAX;
@@ -161,6 +192,7 @@ private:
     void FillDebuggerF0HookInfo(const FHookState &state,
                                 DebuggerF0HookInfo &info) const;
 
+    void InvalidateFTempBankCache();
     void ParseSource(bool preserve_states = true);
     void ExecuteBlock(size_t block_index, CheatBlock &block);
     bool ExecuteBasicWrite(const RawCode &code, GuestAddressSpace active_space,
@@ -186,6 +218,7 @@ private:
     bool ExecuteRawBytes(const CheatBlock &block, size_t index,
                          GuestAddressSpace active_space, uint32_t active_base,
                          size_t &next_index);
+    void PrecompileTypeF(RawCode &code);
     bool ExecuteTypeF(size_t block_index, size_t code_index, const RawCode &code,
                       GuestAddressSpace active_space, uint32_t active_base,
                       std::vector<uint64_t> &active_hooks);
@@ -236,9 +269,12 @@ private:
     static bool FHookHasTrackedEntries(const FHookState &state);
     static bool FHookHasResources(const FHookState &state);
     static void ClearReleasedFHookState(FHookState &state);
+    bool BuildFHookResumePointCache(FHookState &state);
     bool FHookCaveMayStillBeReferenced(const FHookState &state,
                                         const XemuCheatX86Registers &regs);
     bool ReleaseFHookCaveIfSafe(FHookState &state);
+    void RetireFHookResources(FHookState &state);
+    void ReleaseRetiredFHooks();
     void DeactivateFHook(uint64_t key);
     void DeactivateFHooksForBlock(size_t owner_block);
     void DeactivateAllFHooks();

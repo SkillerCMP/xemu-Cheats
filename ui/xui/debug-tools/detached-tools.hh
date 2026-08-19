@@ -15,5 +15,6 @@
 void detached_tools_init(SDL_Window *main_window, void *main_gl_context);
 void detached_tools_cleanup();
 bool detached_tools_process_sdl_event(SDL_Event *event);
+bool detached_tools_owns_window_id(SDL_WindowID window_id);
 void detached_tools_build_frames();
 void detached_tools_render_frames();

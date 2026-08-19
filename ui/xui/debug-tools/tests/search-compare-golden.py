@@ -6,24 +6,12 @@ import argparse
 import pathlib
 import subprocess
 import tempfile
-
-
-def extract_function(text: str, marker: str) -> str:
-    start = text.index(marker)
-    brace = text.index("{", start)
-    depth = 0
-    for i in range(brace, len(text)):
-        ch = text[i]
-        if ch == "{": depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0: return text[start:i+1]
-    raise ValueError(f"unterminated function: {marker}")
+from source_test_utils import extract_function, read_memory_tools_implementation
 
 
 def main() -> int:
     ap=argparse.ArgumentParser(); ap.add_argument("--root",default="."); ap.add_argument("--compiler",required=True); args=ap.parse_args()
-    root=pathlib.Path(args.root).resolve(); src=root/"ui/xui/debug-tools/memory-tools.cc"; text=src.read_text(encoding="utf-8")
+    root=pathlib.Path(args.root).resolve(); text=read_memory_tools_implementation(root / "ui/xui/debug-tools")
     bodies="\n\n".join(extract_function(text,m) for m in (
         "static float raw_to_float",
         "size_t MemoryToolsWindow::ValueSize",

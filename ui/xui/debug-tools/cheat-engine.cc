@@ -10,6 +10,7 @@
 //
 
 #include "cheat-engine.hh"
+#include "guest-pause-guard.hh"
 #include "current-game.hh"
 #include "../font-manager.hh"
 #include "../misc.hh"
@@ -34,33 +35,9 @@ static std::string TypeFHex32(uint32_t value)
     return std::string(buf);
 }
 
-/* Type-F hook/cave updates must be atomic from the guest CPU's point of
- * view.  A running vCPU must not execute a cave while its bytes are being
- * rewritten or observe a half-written E9 hook.  Preserve an existing paused
- * or debugger-stopped state; only resume when this guard paused a running VM. */
-class TypeFGuestPauseGuard {
-public:
-    TypeFGuestPauseGuard()
-        : m_resume(runstate_is_running())
-    {
-        if (m_resume) {
-            vm_stop(RUN_STATE_PAUSED);
-        }
-    }
-
-    ~TypeFGuestPauseGuard()
-    {
-        if (m_resume) {
-            vm_start();
-        }
-    }
-
-    TypeFGuestPauseGuard(const TypeFGuestPauseGuard &) = delete;
-    TypeFGuestPauseGuard &operator=(const TypeFGuestPauseGuard &) = delete;
-
-private:
-    bool m_resume;
-};
+/* Keep the historical Type-F local name so the behavior-bearing hook methods
+ * remain source-identical while sharing the generic Debug Tools pause owner. */
+using TypeFGuestPauseGuard = XemuDebugGuestPauseGuard;
 
 static const char *kInitialSource = R"CHEATS(; xemu RAW Cheat Engine / CMP-style code file
 ; Current-game files are loaded from the "Cheats" folder beside xemu.exe.
@@ -107,44 +84,53 @@ CheatEngineWindow::CheatEngineWindow()
     ParseSource(false);
 }
 
-void CheatEngineWindow::GetActiveF0TempBanks(
-    std::vector<FTempBankInfo> &out) const
+void CheatEngineWindow::InvalidateFTempBankCache()
 {
-    if (out.capacity() < m_f_hooks.size()) {
-        out.reserve(m_f_hooks.size());
+    m_f_temp_bank_cache_dirty = true;
+}
+
+const std::vector<CheatEngineWindow::FTempBankInfo> &
+CheatEngineWindow::GetActiveF0TempBanks() const
+{
+    if (!m_f_temp_bank_cache_dirty) {
+        return m_f_temp_bank_cache;
     }
 
-    size_t count = 0;
+    m_f_temp_bank_cache.clear();
+    if (m_f_temp_bank_cache.capacity() < m_f_hooks.size()) {
+        m_f_temp_bank_cache.reserve(m_f_hooks.size());
+    }
+
     for (const auto &entry : m_f_hooks) {
         const FHookState &state = entry.second;
         if (!state.installed || state.temp_entry == 0 || state.temp_size < 40u) {
             continue;
         }
 
-        if (count == out.size()) {
-            out.emplace_back();
-        }
-        FTempBankInfo &info = out[count++];
-        info.cheat_name.clear();
+        FTempBankInfo info;
         if (state.owner_block < m_blocks.size()) {
             info.cheat_name = m_blocks[state.owner_block].name;
         }
         if (info.cheat_name.empty()) {
             info.cheat_name = "F0 @ " + TypeFHex32(state.hook_address);
         }
+        info.display_name = info.cheat_name + "  [hook " +
+                            TypeFHex32(state.hook_address) + "]";
         info.hook_address = state.hook_address;
         info.cave_address = state.external_entry;
         info.cave_size = state.allocation_size;
         info.temp_address = state.temp_entry;
+        m_f_temp_bank_cache.push_back(std::move(info));
     }
-    out.resize(count);
-    std::sort(out.begin(), out.end(),
+    std::sort(m_f_temp_bank_cache.begin(), m_f_temp_bank_cache.end(),
               [](const FTempBankInfo &a, const FTempBankInfo &b) {
                   if (a.hook_address != b.hook_address) {
                       return a.hook_address < b.hook_address;
                   }
                   return a.cheat_name < b.cheat_name;
               });
+    m_f_temp_bank_cache_dirty = false;
+    return m_f_temp_bank_cache;
 }
 
 bool CheatEngineWindow::ParseDebuggerF0Source(
@@ -283,6 +269,21 @@ bool CheatEngineWindow::ActiveFHookOwnsAddress(uint32_t address) const
         const uint64_t cave_end = cave_start + state.allocation_size;
         if ((probe >= hook_start && probe < hook_end) ||
             (state.external_entry != 0 && probe >= cave_start && probe < cave_end)) {
+            return true;
+        }
+    }
+
+    /* Retired caves are no longer reachable from their original hook, but an
+     * already-running EIP/saved resume point may still use their executable memory.
+     * Keep Inject/Change/NOP from editing that memory until reclamation. */
+    for (const FHookState &state : m_retired_f_hooks) {
+        if (state.external_entry == 0 || state.allocation_size == 0) {
+            continue;
+        }
+        const uint64_t probe = address;
+        const uint64_t cave_start = state.external_entry;
+        const uint64_t cave_end = cave_start + state.allocation_size;
+        if (probe >= cave_start && probe < cave_end) {
             return true;
         }
     }
@@ -867,6 +868,8 @@ void CheatEngineWindow::MaybeAutoLoadCurrentGame()
      * title into the new title's address space; simply forget those stale
      * snapshots and let the new file establish its own hooks. */
     m_f_hooks.clear();
+    m_retired_f_hooks.clear();
+    InvalidateFTempBankCache();
     xemu_cheat_external_code_reset_allocations();
     m_seen_game_generation = generation;
     LoadMatchingCurrentGameFile(true);
@@ -1134,6 +1137,11 @@ void CheatEngineWindow::ParseSource(bool preserve_states)
                 }
             }
 
+            if ((code.command >> 28) == 0xFu &&
+                (((code.command >> 24) & 0xFu) == 0x0u ||
+                 ((code.command >> 24) & 0xFu) == 0x1u)) {
+                PrecompileTypeF(code);
+            }
             current->codes.push_back(std::move(code));
             continue;
         }
@@ -1178,6 +1186,7 @@ void CheatEngineWindow::ParseSource(bool preserve_states)
     if (m_blocks.empty()) {
         m_parse_messages.emplace_back("No RAW code lines were found.");
     }
+    InvalidateFTempBankCache();
 }
 
 bool CheatEngineWindow::ReadGuest(GuestAddressSpace space, uint32_t address,
@@ -1377,6 +1386,75 @@ bool CheatEngineWindow::ParseFRawHex(const RawCode &code,
     return true;
 }
 
+void CheatEngineWindow::PrecompileTypeF(RawCode &code)
+{
+    code.f_precompiled = true;
+    code.f_precompile_ok = false;
+    code.f_probe_code.clear();
+    code.f_probe_data.clear();
+    code.f_uses_preserve = false;
+    code.f_preserve_bytes = 0;
+    code.f_uses_temp = false;
+    code.f_temp_bytes = 0;
+    code.f_definition_signature.clear();
+    code.f_precompile_error.clear();
+    code.f_precompile_error_line = code.source_line;
+
+    const uint32_t subtype = (code.command >> 24) & 0xFu;
+    if (!code.f_terminated) {
+        code.f_precompile_error = "Type-F block is missing DEADCODE";
+        return;
+    }
+
+    if (subtype == 0x0) {
+        size_t signature_size = 3u;
+        for (const XemuCheatAsmLine &src : code.f_body) {
+            signature_size += src.text.size() + 1u;
+        }
+        code.f_definition_signature.reserve(signature_size);
+        code.f_definition_signature = "F0\n";
+        for (const XemuCheatAsmLine &src : code.f_body) {
+            code.f_definition_signature += src.text;
+            code.f_definition_signature.push_back('\n');
+        }
+
+        XemuCheatAsmResult assembled;
+        if (!xemu_cheat_assemble_x86_32(code.f_body, assembled)) {
+            code.f_precompile_error = assembled.error;
+            code.f_precompile_error_line = assembled.error_line > 0
+                                              ? assembled.error_line
+                                              : code.source_line;
+            return;
+        }
+        code.f_probe_code = std::move(assembled.bytes);
+        code.f_probe_data = std::move(assembled.data);
+        code.f_uses_preserve = assembled.uses_preserve;
+        code.f_preserve_bytes = assembled.preserve_bytes;
+        code.f_uses_temp = assembled.uses_temp;
+        code.f_temp_bytes = assembled.temp_bytes;
+        code.f_precompile_ok = true;
+        return;
+    }
+
+    if (subtype == 0x1) {
+        std::string error;
+        int error_line = code.source_line;
+        if (!ParseFRawHex(code, code.f_probe_code, error, error_line)) {
+            code.f_precompile_error = error;
+            code.f_precompile_error_line = error_line;
+            return;
+        }
+        code.f_definition_signature.assign("F1\n", 3);
+        code.f_definition_signature.append(
+            reinterpret_cast<const char *>(code.f_probe_code.data()),
+            code.f_probe_code.size());
+        code.f_precompile_ok = true;
+        return;
+    }
+
+    code.f_precompile_error = "Unsupported Type-F subtype";
+}
+
 bool CheatEngineWindow::InstallFHook(
     size_t owner_block, uint64_t key, uint32_t hook_address,
     const std::vector<uint8_t> &probe_code,
@@ -1436,6 +1514,10 @@ bool CheatEngineWindow::InstallFHook(
     if (it != m_f_hooks.end() && it->second.installed &&
         it->second.hook_address == hook_address &&
         it->second.definition_signature == definition_signature) {
+        if (it->second.owner_block != owner_block &&
+            it->second.temp_entry != 0 && it->second.temp_size >= 40u) {
+            InvalidateFTempBankCache();
+        }
         it->second.owner_block = owner_block;
         return true;
     }
@@ -1464,6 +1546,15 @@ bool CheatEngineWindow::InstallFHook(
     FHookState &state = it->second;
     state.owner_block = owner_block;
 
+    /* Every post-allocation install failure owns the same rollback contract:
+     * these allocations were never reachable from a guest hook, so they may
+     * be reclaimed immediately. Keep that contract in one place so a future
+     * failure branch cannot forget either the reachability flag or release. */
+    auto cleanup_failed_install = [&]() {
+        state.retired_may_be_referenced = false;
+        ReleaseFHookCaveIfSafe(state);
+    };
+
     if (state.installed && state.definition_signature != definition_signature) {
         DeactivateFHook(key);
         if (state.installed) {
@@ -1473,15 +1564,13 @@ bool CheatEngineWindow::InstallFHook(
         }
     }
 
-    /* Never overwrite a retired cave or its preservation frames while EIP is
-     * still inside the old cave or one of its CALLs has a pending return. */
-    if (!state.installed &&
-        (state.external_entry != 0 || state.preserve_entry != 0 ||
-         state.temp_entry != 0) &&
+    /* A previous version of this hook may still have allocations attached if
+     * an earlier install/deactivation could not reclaim them immediately.
+     * Never make the new F0 wait on that old cave: detach it into the retired
+     * queue and let it finish safely while this hook receives a fresh cave. */
+    if (!state.installed && FHookHasTrackedEntries(state) &&
         !ReleaseFHookCaveIfSafe(state)) {
-        m_last_runtime_message =
-            "Type-F hook install: previous cave is still executing or could not be safely reclaimed; retrying on the next tick.";
-        return false;
+        RetireFHookResources(state);
     }
 
     uint32_t overwrite_length = 0;
@@ -1526,8 +1615,7 @@ bool CheatEngineWindow::InstallFHook(
                                                    &preserve_entry)) {
             m_last_runtime_message =
                 "Type-F0 hook install: could not allocate private preservation frames.";
-            state.retired_may_be_referenced = false;
-            ReleaseFHookCaveIfSafe(state);
+            cleanup_failed_install();
             return false;
         }
         state.preserve_entry = preserve_entry;
@@ -1539,8 +1627,7 @@ bool CheatEngineWindow::InstallFHook(
         if (!xemu_cheat_external_preserve_allocate(temp_bytes, &temp_entry)) {
             m_last_runtime_message =
                 "Type-F0 hook install: could not allocate private T0-T7/TFLAGS bank.";
-            state.retired_may_be_referenced = false;
-            ReleaseFHookCaveIfSafe(state);
+            cleanup_failed_install();
             return false;
         }
         state.temp_entry = temp_entry;
@@ -1562,8 +1649,7 @@ bool CheatEngineWindow::InstallFHook(
                     std::to_string(final_asm.error_line);
             }
             m_last_runtime_message += ": " + final_asm.error;
-            state.retired_may_be_referenced = false;
-            ReleaseFHookCaveIfSafe(state);
+            cleanup_failed_install();
             return false;
         }
         if (final_asm.bytes.size() != probe_code.size() ||
@@ -1572,8 +1658,7 @@ bool CheatEngineWindow::InstallFHook(
             final_asm.uses_temp != f0_uses_temp) {
             m_last_runtime_message =
                 "Type-F0 internal error: final assembly changed the probed cave layout.";
-            state.retired_may_be_referenced = false;
-            ReleaseFHookCaveIfSafe(state);
+            cleanup_failed_install();
             return false;
         }
         final_code = &final_asm.bytes;
@@ -1606,10 +1691,15 @@ bool CheatEngineWindow::InstallFHook(
                                          payload.data(), payload.size())) {
         m_last_runtime_message =
             "Type-F hook install: failed to write code/DEADCODE/DD payload to external memory.";
-        state.retired_may_be_referenced = false;
-        ReleaseFHookCaveIfSafe(state);
+        cleanup_failed_install();
         return false;
     }
+
+    /* Cache every executable instruction boundary once while the freshly-written
+     * cave is available. These resume points cover normal CALL returns as well
+     * as EIP values saved by guest interrupts/exceptions. A failure is
+     * conservative: retirement can retry lazily. */
+    BuildFHookResumePointCache(state);
 
     uint8_t hook[32];
     memset(hook, 0x90, state.overwrite_length);
@@ -1621,8 +1711,8 @@ bool CheatEngineWindow::InstallFHook(
     hook[4] = (uint8_t)((hook_rel >> 24) & 0xFFu);
 
     state.installed = true;
-    if (!WriteGuest(GuestAddressSpace::Virtual, hook_address,
-                    hook, state.overwrite_length)) {
+    if (!xemu_cheat_patch_virtual(hook_address, hook,
+                                  state.overwrite_length)) {
         const std::string write_error =
             "Type-F hook install: failed to write the guest hook JMP at 0x" +
             TypeFHex32(hook_address) + ".";
@@ -1638,6 +1728,72 @@ bool CheatEngineWindow::InstallFHook(
     }
 
     state.retired_may_be_referenced = false;
+    InvalidateFTempBankCache();
+    return true;
+}
+
+bool CheatEngineWindow::BuildFHookResumePointCache(FHookState &state)
+{
+    state.resume_points.clear();
+    state.resume_points_valid = false;
+    if (state.external_entry == 0 || state.code_size == 0) {
+        state.resume_points_valid = true;
+        return true;
+    }
+
+    /* The generated DEADCODE jump is executable too. An interrupt can land
+     * between the final user instruction and that jump, so include its start
+     * address in the immutable resume-point cache as well. DD data that follows
+     * the jump is intentionally excluded. */
+    const uint64_t executable_end =
+        (uint64_t)state.external_entry + state.code_size + 5u;
+    uint32_t decode_pc = state.external_entry;
+    while ((uint64_t)decode_pc < executable_end) {
+        XemuCheatDisasmRow rows[128] = {};
+        size_t row_count = 0;
+        const int rc = xemu_cheat_disassemble_paired(
+            decode_pc, (int)(sizeof(rows) / sizeof(rows[0])), rows,
+            sizeof(rows) / sizeof(rows[0]), &row_count);
+        if (rc != XEMU_CHEAT_DISAS_OK || row_count == 0) {
+            return false;
+        }
+
+        uint32_t next_pc = decode_pc;
+        for (size_t i = 0; i < row_count; ++i) {
+            const XemuCheatDisasmRow &row = rows[i];
+            if ((uint64_t)row.virtual_address >= executable_end) {
+                break;
+            }
+            if (row.size == 0) {
+                return false;
+            }
+            const uint64_t after =
+                (uint64_t)row.virtual_address + (uint64_t)row.size;
+            if (after > executable_end) {
+                return false;
+            }
+
+            /* x86 interrupt/exception frames and CALL returns resume at an
+             * instruction boundary. Recording every valid start is therefore
+             * stronger than tracking CALL return sites alone and also handles
+             * caves that contain no CALL instructions at all. */
+            state.resume_points.push_back(row.virtual_address);
+            next_pc = (uint32_t)after;
+        }
+        if ((uint64_t)next_pc >= executable_end) {
+            break;
+        }
+        if (next_pc <= decode_pc) {
+            return false;
+        }
+        decode_pc = next_pc;
+    }
+
+    std::sort(state.resume_points.begin(), state.resume_points.end());
+    state.resume_points.erase(
+        std::unique(state.resume_points.begin(), state.resume_points.end()),
+        state.resume_points.end());
+    state.resume_points_valid = true;
     return true;
 }
 
@@ -1654,67 +1810,17 @@ bool CheatEngineWindow::FHookCaveMayStillBeReferenced(
         return true;
     }
 
-    /* If a cave executed CALL and the callee is still running, EIP can already
-     * be outside the cave while a return address still points back into it.
-     * Decode only this cave's user-code span and collect the exact return
-     * addresses of real CALL instructions. This is much less prone to false
-     * positives than treating any stack value in the 1 MiB arena as a return. */
-    std::vector<uint32_t> call_returns;
-    const uint64_t code_end = cave_start + state.code_size;
-    uint32_t decode_pc = state.external_entry;
-    while ((uint64_t)decode_pc < code_end) {
-        XemuCheatDisasmRow rows[128] = {};
-        size_t row_count = 0;
-        const int rc = xemu_cheat_disassemble_paired(
-            decode_pc, (int)(sizeof(rows) / sizeof(rows[0])), rows,
-            sizeof(rows) / sizeof(rows[0]), &row_count);
-        if (rc != XEMU_CHEAT_DISAS_OK || row_count == 0) {
-            /* We cannot prove that no CALL return is pending, so leave this
-             * cave retired rather than risk clearing live return code. */
-            return true;
-        }
-
-        uint32_t next_pc = decode_pc;
-        for (size_t i = 0; i < row_count; ++i) {
-            const XemuCheatDisasmRow &row = rows[i];
-            if ((uint64_t)row.virtual_address >= code_end) {
-                break;
-            }
-            if (row.size == 0) {
-                return true;
-            }
-
-            const uint64_t after =
-                (uint64_t)row.virtual_address + (uint64_t)row.size;
-            if (after > code_end) {
-                /* The final instruction should never straddle DEADCODE. */
-                return true;
-            }
-
-            if (g_ascii_strcasecmp(row.mnemonic, "call") == 0) {
-                call_returns.push_back((uint32_t)after);
-            }
-            next_pc = (uint32_t)after;
-        }
-
-        if ((uint64_t)next_pc >= code_end) {
-            break;
-        }
-        if (next_pc <= decode_pc) {
-            return true;
-        }
-        decode_pc = next_pc;
+    /* Resume points are decoded once when the cave is installed (or lazily
+     * during retirement if that initial cache could not be built). This covers
+     * CALL returns and EIP saved by guest interrupts/exceptions without
+     * redisassembling immutable cave code on every retirement tick. */
+    if (!state.resume_points_valid) {
+        return true;
     }
-
-    if (call_returns.empty()) {
+    if (state.resume_points.empty()) {
         return false;
     }
-    std::sort(call_returns.begin(), call_returns.end());
 
-    /* Only caves containing CALL need a stack scan. Search the next 64 KiB
-     * from ESP for one of the exact CALL return addresses collected above.
-     * Stop at the first unreadable range (normally the mapped stack boundary).
-     * A false positive can only delay reclamation; active caves never move. */
     constexpr size_t kStackScanBytes = 0x10000;
     constexpr size_t kStackChunk = 0x1000;
     uint8_t buffer[kStackChunk];
@@ -1730,10 +1836,6 @@ bool CheatEngineWindow::FHookCaveMayStillBeReferenced(
             break;
         }
         if (!ReadGuest(GuestAddressSpace::Virtual, address, buffer, amount)) {
-            /* ESP itself should be readable. If the first stack range cannot
-             * be inspected, be conservative and keep the cave retired. Once
-             * at least one contiguous range was read, an unreadable next page
-             * is treated as the mapped stack boundary. */
             if (scanned == 0) {
                 return true;
             }
@@ -1746,8 +1848,8 @@ bool CheatEngineWindow::FHookCaveMayStillBeReferenced(
                 ((uint32_t)buffer[off + 1] << 8) |
                 ((uint32_t)buffer[off + 2] << 16) |
                 ((uint32_t)buffer[off + 3] << 24);
-            if (std::binary_search(call_returns.begin(), call_returns.end(),
-                                   candidate)) {
+            if (std::binary_search(state.resume_points.begin(),
+                                   state.resume_points.end(), candidate)) {
                 return true;
             }
         }
@@ -1759,7 +1861,6 @@ bool CheatEngineWindow::FHookCaveMayStillBeReferenced(
         }
         address = (uint32_t)next_address;
     }
-
     return false;
 }
 
@@ -1787,6 +1888,10 @@ void CheatEngineWindow::ClearReleasedFHookState(FHookState &state)
     state.temp_size = 0;
     state.definition_signature.clear();
     state.retired_may_be_referenced = false;
+    state.resume_points_valid = false;
+    state.resume_points.clear();
+    state.retire_backoff_ticks = 0;
+    state.retire_skip_ticks = 0;
 }
 
 bool CheatEngineWindow::ReleaseFHookCaveIfSafe(FHookState &state)
@@ -1799,16 +1904,18 @@ bool CheatEngineWindow::ReleaseFHookCaveIfSafe(FHookState &state)
         return true;
     }
 
-    const bool was_running = runstate_is_running();
-    if (was_running) {
-        vm_stop(RUN_STATE_PAUSED);
-    }
+    TypeFGuestPauseGuard guest_pause;
 
     bool safe_to_release = true;
     if (have_cave && state.retired_may_be_referenced) {
-        XemuCheatX86Registers regs = {};
-        const bool have_regs = xemu_cheat_get_x86_registers(&regs) != 0;
-        safe_to_release = have_regs && !FHookCaveMayStillBeReferenced(state, regs);
+        if (!state.resume_points_valid && !BuildFHookResumePointCache(state)) {
+            safe_to_release = false;
+        } else {
+            XemuCheatX86Registers regs = {};
+            const bool have_regs = xemu_cheat_get_x86_registers(&regs) != 0;
+            safe_to_release = have_regs &&
+                              !FHookCaveMayStillBeReferenced(state, regs);
+        }
     }
 
     bool released = false;
@@ -1850,11 +1957,99 @@ bool CheatEngineWindow::ReleaseFHookCaveIfSafe(FHookState &state)
         }
     }
 
-    if (was_running) {
-        vm_start();
-    }
     return released;
 }
+
+void CheatEngineWindow::RetireFHookResources(FHookState &state)
+{
+    if (!FHookHasTrackedEntries(state)) {
+        return;
+    }
+
+    FHookState retired;
+    retired.owner_block = state.owner_block;
+    retired.hook_address = state.hook_address;
+    retired.overwrite_length = state.overwrite_length;
+    retired.external_entry = state.external_entry;
+    retired.allocation_size = state.allocation_size;
+    retired.code_size = state.code_size;
+    retired.preserve_entry = state.preserve_entry;
+    retired.preserve_size = state.preserve_size;
+    retired.temp_entry = state.temp_entry;
+    retired.temp_size = state.temp_size;
+    retired.retired_may_be_referenced = state.retired_may_be_referenced;
+    retired.resume_points_valid = state.resume_points_valid;
+    retired.resume_points = std::move(state.resume_points);
+    retired.retire_backoff_ticks = 0;
+    /* Never reclaim a cave on the same UI action that restored the hook.
+     * At the normal 10 Hz engine rate, two skipped retirement ticks provide a
+     * short grace window for guest interrupt/exception frames to unwind. */
+    retired.retire_skip_ticks = 2;
+
+    /* The active hook state keeps its hook/original-byte identity, but no
+     * longer owns the old allocations. This is what allows A OFF -> B ON at
+     * the same hook address without B waiting for A's cave to be reclaimed. */
+    state.external_entry = 0;
+    state.allocation_size = 0;
+    state.code_size = 0;
+    state.preserve_entry = 0;
+    state.preserve_size = 0;
+    state.temp_entry = 0;
+    state.temp_size = 0;
+    state.retired_may_be_referenced = false;
+    state.resume_points_valid = false;
+    state.resume_points.clear();
+    state.retire_backoff_ticks = 0;
+    state.retire_skip_ticks = 0;
+
+    if (FHookHasTrackedEntries(retired)) {
+        m_retired_f_hooks.push_back(std::move(retired));
+    }
+}
+
+void CheatEngineWindow::ReleaseRetiredFHooks()
+{
+    if (m_retired_f_hooks.empty()) {
+        return;
+    }
+
+    bool have_due = false;
+    for (FHookState &state : m_retired_f_hooks) {
+        if (state.retire_skip_ticks != 0) {
+            --state.retire_skip_ticks;
+        } else {
+            have_due = true;
+        }
+    }
+    if (!have_due) {
+        return;
+    }
+
+    /* Pause at most once for all caves that are due this tick. Caves that are
+     * still referenced use a small exponential tick backoff (100 ms -> 200 ->
+     * 400 -> 800 -> 1 s at the normal 10 Hz engine rate), avoiding repeated
+     * stack scans while preserving prompt eventual reclamation. */
+    TypeFGuestPauseGuard guest_pause;
+    auto it = m_retired_f_hooks.begin();
+    while (it != m_retired_f_hooks.end()) {
+        if (it->retire_skip_ticks != 0) {
+            ++it;
+            continue;
+        }
+        if (ReleaseFHookCaveIfSafe(*it) || !FHookHasTrackedEntries(*it)) {
+            it = m_retired_f_hooks.erase(it);
+        } else {
+            const uint8_t next = it->retire_backoff_ticks == 0
+                                     ? 1
+                                     : (uint8_t)std::min<int>(
+                                           10, it->retire_backoff_ticks * 2);
+            it->retire_backoff_ticks = next;
+            it->retire_skip_ticks = next;
+            ++it;
+        }
+    }
+}
+
 
 void CheatEngineWindow::DeactivateFHook(uint64_t key)
 {
@@ -1868,37 +2063,36 @@ void CheatEngineWindow::DeactivateFHook(uint64_t key)
         return;
     }
 
-    const bool was_running = runstate_is_running();
-    if (was_running) {
-        vm_stop(RUN_STATE_PAUSED);
-    }
+    TypeFGuestPauseGuard guest_pause;
 
     if (state.installed) {
         if (state.original_bytes.empty() ||
-            !WriteGuest(GuestAddressSpace::Virtual, state.hook_address,
-                        state.original_bytes.data(), state.original_bytes.size())) {
-            if (was_running) {
-                vm_start();
-            }
+            !xemu_cheat_patch_virtual(state.hook_address,
+                                      state.original_bytes.data(),
+                                      state.original_bytes.size())) {
             return;
         }
         state.installed = false;
+        InvalidateFTempBankCache();
         /* The hook really was reachable before restoration. EIP may still be
-         * inside the cave, or a CALL may have a pending return into it. */
+         * inside the cave, or the guest may have a saved resume EIP into it. */
         state.retired_may_be_referenced = true;
     }
 
-    /* Once the original hook is restored, reclaim only this cave. Active
-     * neighboring caves are never moved. A genuinely retired cave is kept if
-     * EIP is inside it or a live CALL return still points back into it. A cave
-     * from a failed pre-hook install is known unreachable and skips that scan. */
+    /* Once the original hook is restored, a cave that was ever reachable is
+     * always detached into the retired queue first. Do not free/reuse it on the
+     * same UI action: guest interrupt/exception frames may still contain a
+     * resume EIP into the old cave even when the currently-visible EIP is
+     * elsewhere. Failed pre-hook allocations were never reachable and may
+     * still be reclaimed immediately. */
     if (FHookHasResources(state)) {
-        ReleaseFHookCaveIfSafe(state);
+        if (state.retired_may_be_referenced) {
+            RetireFHookResources(state);
+        } else if (!ReleaseFHookCaveIfSafe(state)) {
+            RetireFHookResources(state);
+        }
     }
 
-    if (was_running) {
-        vm_start();
-    }
 }
 
 void CheatEngineWindow::DeactivateFHooksForBlock(size_t owner_block)
@@ -2447,73 +2641,37 @@ bool CheatEngineWindow::ExecuteTypeF(
 
     const uint32_t hook_address = active_base + code.value;
 
-    std::vector<uint8_t> bytes;
-    std::vector<uint8_t> attached_data;
-    const std::vector<XemuCheatAsmLine> *f0_source = nullptr;
-    bool f0_uses_preserve = false;
-    uint32_t preserve_bytes = 0;
-    bool f0_uses_temp = false;
-    uint32_t temp_bytes = 0;
-    std::string definition_signature;
-
-    if (subtype == 0x0) {
-        /* This is the exact signature that InstallFHook() already uses. Build
-         * it before the probe assembly so a steady-state installed F0 can be
-         * recognized without reassembling identical source every engine tick. */
-        size_t signature_size = 3u;
-        for (const XemuCheatAsmLine &src : code.f_body) {
-            signature_size += src.text.size() + 1u;
-        }
-        definition_signature.reserve(signature_size);
-        definition_signature = "F0\n";
-        for (const XemuCheatAsmLine &src : code.f_body) {
-            definition_signature += src.text;
-            definition_signature.push_back('\n');
-        }
-
-        auto installed = m_f_hooks.find(hook_key);
-        if (installed != m_f_hooks.end() && installed->second.installed &&
-            installed->second.hook_address == hook_address &&
-            installed->second.definition_signature == definition_signature) {
-            installed->second.owner_block = block_index;
-            active_hooks.push_back(hook_key);
-            return true;
-        }
-
-        XemuCheatAsmResult assembled;
-        if (!xemu_cheat_assemble_x86_32(code.f_body, assembled)) {
+    if (!code.f_precompiled || !code.f_precompile_ok) {
+        if (subtype == 0x0) {
             m_last_runtime_message = "Type-F0 assembler error";
-            if (assembled.error_line > 0) {
+            if (code.f_precompile_error_line > 0) {
                 m_last_runtime_message += " on source line " +
-                    std::to_string(assembled.error_line);
+                    std::to_string(code.f_precompile_error_line);
             }
-            m_last_runtime_message += ": " + assembled.error;
-            return false;
-        }
-        bytes = std::move(assembled.bytes);
-        attached_data = std::move(assembled.data);
-        f0_source = &code.f_body;
-        f0_uses_preserve = assembled.uses_preserve;
-        preserve_bytes = assembled.preserve_bytes;
-        f0_uses_temp = assembled.uses_temp;
-        temp_bytes = assembled.temp_bytes;
-    } else {
-        std::string error;
-        int error_line = code.source_line;
-        if (!ParseFRawHex(code, bytes, error, error_line)) {
+        } else {
             m_last_runtime_message =
                 "Type-F1 raw-hex error on source line " +
-                std::to_string(error_line) + ": " + error;
-            return false;
+                std::to_string(code.f_precompile_error_line > 0
+                                   ? code.f_precompile_error_line
+                                   : code.source_line);
         }
-        definition_signature.assign("F1\n", 3);
-        definition_signature.append(
-            reinterpret_cast<const char *>(bytes.data()), bytes.size());
+        if (!code.f_precompile_error.empty()) {
+            m_last_runtime_message += ": " + code.f_precompile_error;
+        }
+        return false;
     }
 
-    if (!InstallFHook(block_index, hook_key, hook_address, bytes, attached_data,
-                      f0_source, f0_uses_preserve, preserve_bytes,
-                      f0_uses_temp, temp_bytes, definition_signature)) {
+    const std::vector<XemuCheatAsmLine> *f0_source =
+        subtype == 0x0 ? &code.f_body : nullptr;
+
+    /* The parse-time probe/signature is immutable for this RawCode.  Normal
+     * 10 Hz ticks now reach InstallFHook's installed/signature fast path
+     * without rebuilding strings, reassembling F0, or reparsing F1 bytes. */
+    if (!InstallFHook(block_index, hook_key, hook_address,
+                      code.f_probe_code, code.f_probe_data, f0_source,
+                      code.f_uses_preserve, code.f_preserve_bytes,
+                      code.f_uses_temp, code.f_temp_bytes,
+                      code.f_definition_signature)) {
         if (m_last_runtime_message.empty()) {
             m_last_runtime_message =
                 "Type-F hook installation failed on source line " +
@@ -2887,16 +3045,44 @@ void CheatEngineWindow::Tick()
     MaybeAutoLoadCurrentGame();
 
     const bool cpu_available = xemu_cheat_cpu_available() != 0;
-    for (size_t i = 0; i < m_blocks.size(); ++i) {
-        if (!m_engine_enabled || !m_live_cheats_enabled ||
-            !m_blocks[i].enabled) {
-            if (cpu_available) {
-                DeactivateFHooksForBlock(i);
+    if (!cpu_available) {
+        return;
+    }
+
+    ReleaseRetiredFHooks();
+
+    /* Deactivate normal cheat-owned F hooks with one map scan and one guest
+     * pause window. The old path scanned the entire F-hook table once for
+     * every cheat block on every 10 Hz tick. Debugger-owned CodeCave hooks
+     * use kDebuggerFHookOwner and intentionally remain independent of the
+     * Cheat Engine's global/live checkboxes. */
+    const bool run_live_blocks = m_engine_enabled && m_live_cheats_enabled;
+    m_f_deactivate_scratch.clear();
+    for (const auto &entry : m_f_hooks) {
+        const size_t owner = entry.second.owner_block;
+        if (owner >= m_blocks.size()) {
+            continue;
+        }
+        if (!run_live_blocks || !m_blocks[owner].enabled) {
+            if (entry.second.installed || FHookHasTrackedEntries(entry.second)) {
+                m_f_deactivate_scratch.emplace_back(owner, entry.first);
             }
         }
     }
+    if (!m_f_deactivate_scratch.empty()) {
+        /* Preserve the old block-by-block deactivation order while retaining
+         * one hook-table scan. stable_sort keeps the unordered-map iteration
+         * order unchanged for hooks that belong to the same block. */
+        std::stable_sort(
+            m_f_deactivate_scratch.begin(), m_f_deactivate_scratch.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+        TypeFGuestPauseGuard guest_pause;
+        for (const auto &pending : m_f_deactivate_scratch) {
+            DeactivateFHook(pending.second);
+        }
+    }
 
-    if (!m_engine_enabled || !m_live_cheats_enabled || !cpu_available) {
+    if (!run_live_blocks) {
         return;
     }
 

@@ -25,6 +25,8 @@ ALLOCATOR_GOLDEN = "ui/xui/debug-tools/tests/allocator-golden.py"
 SEARCH_COMPARE_GOLDEN = "ui/xui/debug-tools/tests/search-compare-golden.py"
 F0_STEADY_GOLDEN = "ui/xui/debug-tools/tests/f0-steady-state-golden.py"
 MEMORY_FORMAT_GOLDEN = "ui/xui/debug-tools/tests/memory-format-golden.py"
+PASS3_STRUCTURAL_GOLDEN = "ui/xui/debug-tools/tests/pass3-structural-refactor-golden.py"
+PASS9_AUDIT_GOLDEN = "ui/xui/debug-tools/tests/pass9-audit-cleanup-golden.py"
 
 
 def sha256(path: Path) -> str:
@@ -68,6 +70,8 @@ def validate(root: Path) -> list[str]:
     require_file(root, SEARCH_COMPARE_GOLDEN, errors)
     require_file(root, F0_STEADY_GOLDEN, errors)
     require_file(root, MEMORY_FORMAT_GOLDEN, errors)
+    require_file(root, PASS3_STRUCTURAL_GOLDEN, errors)
+    require_file(root, PASS9_AUDIT_GOLDEN, errors)
     build_sh = require_file(root, "build.sh", errors)
     windows_yml = require_file(root, ".github/workflows/build-windows.yml", errors)
     build_yml = require_file(root, ".github/workflows/build.yml", errors)
@@ -91,7 +95,9 @@ def validate(root: Path) -> list[str]:
     regression_runner = root / REGRESSION_RUNNER
     regression_text = read_text(regression_runner, errors) if regression_runner.is_file() else ""
     for required_test in ("allocator-golden.py", "search-compare-golden.py",
-                          "f0-steady-state-golden.py", "memory-format-golden.py"):
+                          "f0-steady-state-golden.py", "memory-format-golden.py",
+                          "pass3-structural-refactor-golden.py",
+                          "pass9-audit-cleanup-golden.py"):
         if required_test not in regression_text:
             errors.append(f"{REGRESSION_RUNNER}: required test `{required_test}` is not invoked")
 

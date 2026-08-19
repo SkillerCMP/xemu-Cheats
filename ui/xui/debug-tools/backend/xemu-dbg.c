@@ -28,6 +28,7 @@
 #include "exec/gdbstub.h"
 #include "gdbstub/enums.h"
 #include "exec/cputlb.h"
+#include "exec/tb-flush.h"
 #include "qapi/error.h"
 
 #include "xemu-dbg.h"
@@ -173,7 +174,27 @@ int xemu_dbg_flush_guest_translation(void)
     }
 
     if (tcg_enabled()) {
+        bool was_running = false;
+
+        /* Type-F caves live in xemu-owned RAM and are written directly through
+         * the backing MemoryRegion. memory_region_set_dirty() is sufficient for
+         * RAM coherency, but it does not invalidate host code that TCG already
+         * translated for the old bytes at the same guest virtual address.
+         *
+         * Keep both sides coherent before the guest can execute again:
+         *   - tlb_flush() drops stale guest virtual->physical translations.
+         *   - tb_flush__exclusive_or_serial() drops stale translated code.
+         *
+         * The TB API requires an exclusive/serial context. Most Type-F callers
+         * already hold TypeFGuestPauseGuard, but make this helper safe for the
+         * other executable-patch callers too by stopping a running VM here and
+         * only resuming it when this helper performed the stop. */
+        if (!xemu_dbg_pause_for_accel_update(&was_running)) {
+            return 0;
+        }
         tlb_flush(cpu);
+        tb_flush__exclusive_or_serial();
+        xemu_dbg_restore_run_state(was_running);
         return 1;
     }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Golden tests for hot-path Memory Viewer hexadecimal formatting helpers.
 
-The generated harness compiles the exact helper bodies from memory-tools.cc and
+The generated harness compiles the exact helper bodies from the split MemoryTools implementation and
 compares their output to snprintf's historical %02X / %08X formatting. This
 protects the allocation/formatting cleanup without requiring a full xemu build.
 """
@@ -11,25 +11,7 @@ import argparse
 import pathlib
 import subprocess
 import tempfile
-
-
-def extract_function(text: str, signature: str) -> str:
-    start = text.find(signature)
-    if start < 0:
-        raise RuntimeError(f"missing function: {signature}")
-    brace = text.find("{", start)
-    if brace < 0:
-        raise RuntimeError(f"missing opening brace: {signature}")
-    depth = 0
-    for pos in range(brace, len(text)):
-        ch = text[pos]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : pos + 1]
-    raise RuntimeError(f"missing closing brace: {signature}")
+from source_test_utils import extract_function, read_memory_tools_implementation
 
 
 def main() -> int:
@@ -39,7 +21,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = pathlib.Path(args.root).resolve()
-    source = (root / "ui/xui/debug-tools/memory-tools.cc").read_text(encoding="utf-8")
+    source = read_memory_tools_implementation(root / "ui/xui/debug-tools")
     byte_helper = extract_function(source, "static void format_hex_byte(")
     u32_helper = extract_function(source, "static void format_hex_u32(")
 

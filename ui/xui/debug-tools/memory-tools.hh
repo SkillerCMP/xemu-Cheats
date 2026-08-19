@@ -14,6 +14,7 @@
 #include "cheat-engine-memory.h"
 #include "breakpoint-conditions.hh"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -68,6 +69,20 @@ private:
         uint32_t address = 0;
         uint32_t previous_raw = 0;
         uint32_t current_raw = 0;
+    };
+
+    /* Small direct-mapped presentation cache for clipped Search-result rows.
+     * Every entry carries its complete render key, so reuse is allowed only
+     * when index/address/raw values/value kind are all still identical. */
+    struct SearchDisplayCacheEntry {
+        size_t result_index = SIZE_MAX;
+        uint32_t address = 0;
+        uint32_t previous_raw = 0;
+        uint32_t current_raw = 0;
+        ValueKind value_kind = ValueKind::U32;
+        char address_text[16] = {};
+        char previous_text[64] = {};
+        char current_text[64] = {};
     };
 
     struct VirtualDumpRegion {
@@ -195,6 +210,7 @@ private:
     char m_search_value_text[32] = {};
     std::string m_search_status;
     std::vector<SearchResult> m_results;
+    std::array<SearchDisplayCacheEntry, 256> m_search_display_cache = {};
 
     uint32_t m_snapshot_start = 0;
     uint32_t m_snapshot_end = 0;
@@ -229,6 +245,13 @@ private:
     bool m_follow_eip = true;
     std::vector<XemuCheatDisasmRow> m_disassembly_rows;
     std::vector<DisassemblyFlowCache> m_disassembly_flow_cache;
+    // Per-row display strings are immutable between disassembly/label changes.
+    // Cache both panes so the render loop does not reformat bytes/instructions
+    // or binary-search the label database every frame.
+    std::vector<std::string> m_disassembly_virtual_text;
+    std::vector<std::string> m_disassembly_physical_text;
+    uint64_t m_disassembly_label_generation = UINT64_MAX;
+    bool m_disassembly_cached_labels_enabled = false;
     // Reused 4 KiB decode workspace. A page can contain thousands of short
     // x86 instructions, so keeping this buffer avoids a ~672 KiB allocation
     // on every debugger refresh/navigation.
@@ -241,6 +264,7 @@ private:
     float m_disasm_pane_height = 320.0f;
     bool m_disasm_scroll_to_focus = false;
     uint32_t m_disasm_focus_virtual = 0;
+    uint64_t m_code_patch_generation = 0;
     std::string m_debug_status;
 
     // XBE label browser. The XBE virtual address is always the master key;
@@ -250,6 +274,12 @@ private:
     bool m_label_browser_focus_requested = false;
     char m_label_search[128] = {};
     int m_label_filter = 0; // 0=All, then XemuXbeLabels::Type + 1
+    int m_label_source_filter = 0; // 0=All, then XemuXbeLabels::Source + 1
+    std::vector<size_t> m_visible_label_cache;
+    uint64_t m_visible_label_generation = UINT64_MAX;
+    char m_visible_label_search[128] = {};
+    int m_visible_label_filter = -1;
+    int m_visible_label_source_filter = -1;
     int m_selected_label_index = -1;
     std::string m_label_status;
 
@@ -322,6 +352,9 @@ private:
     bool m_have_break_registers = false;
     bool m_have_break_extra_registers = false;
     int m_register_view = 0; // 0=General, 1=x87/FPU, 2=MMX, 3=SSE
+    bool m_debug_preferences_initialized = false;
+    bool m_register_view_selection_pending = true;
+    ImGuiContext *m_register_view_context = nullptr;
     bool m_was_debug_paused = false;
     uint32_t m_last_break_pc = 0;
     bool m_have_break_highlight = false;
@@ -340,6 +373,14 @@ private:
     size_t m_debug_nav_index = 0;
     bool m_have_debug_nav_history = false;
     bool m_debug_nav_key_consumed = false;
+
+    // Programmatic Follow/Back/Forward changes the selected instruction after
+    // the panes have already drawn for the current frame. Keep ImGui keyboard
+    // navigation attached to that new selected row on the next frame instead
+    // of leaving Up/Down anchored to the pre-navigation source instruction.
+    bool m_disasm_keyboard_focus_requested = false;
+    bool m_disasm_keyboard_focus_physical = false;
+    bool m_disasm_last_keyboard_focus_physical = false;
 
     // Context-menu follows are deferred until both disassembly panes finish
     // drawing. Refreshing the row vector while one pane is iterating it can
@@ -366,6 +407,9 @@ private:
     void DrawMemoryMapPane(float height);
     void DrawSearch();
     void DrawDebugger();
+    void LoadDebuggerPreferences();
+    void StoreDebuggerPreferences();
+    void ResetDebuggerPreferences();
     void DrawRegisters(const XemuCheatX86Registers &regs, bool breakpoint_snapshot);
     void DrawGeneralRegisterTable(const XemuCheatX86Registers &regs,
                                   bool breakpoint_snapshot);
@@ -386,6 +430,9 @@ private:
     void DumpCurrentPage(AddressSpace space, uint32_t address);
     bool DumpRange(AddressSpace space, uint32_t base, uint64_t size,
                    const std::string &path, size_t &failed_pages) const;
+    bool CollectRamVirtualPages(uint64_t ram_size,
+                                std::vector<VirtualPageMapping> &pages,
+                                bool &used_page_table_snapshot) const;
     bool ScanMappedVirtualRam(uint64_t ram_size,
                               std::vector<VirtualDumpRegion> &regions,
                               uint64_t &mapped_pages) const;
@@ -428,6 +475,7 @@ private:
                                             XemuCheatDisasmRow &access_row);
     void RefreshDisassembly();
     void RebuildDisassemblyFlowCache();
+    void RebuildDisassemblyRenderCache();
     void UpdateBreakpointHitState();
     void FollowDebuggerAddress(uint32_t address, bool refresh_disassembly);
     void NavigateDebuggerAddress(uint32_t address);

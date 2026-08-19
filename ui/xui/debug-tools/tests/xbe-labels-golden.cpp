@@ -67,6 +67,13 @@ int main()
     put32(file, 0x120, base + 0x200);
     put32(file, 0x128, entry ^ retail_entry_key);
     put32(file, 0x158, thunk_va ^ retail_thunk_key);
+    put32(file, 0x160, 1);
+    put32(file, 0x164, base + 0x340);
+    std::memcpy(file.data() + 0x340, "XAPILIB", 7);
+    file[0x348] = 1; file[0x349] = 0;
+    file[0x34a] = 0; file[0x34b] = 0;
+    file[0x34c] = 0xD9; file[0x34d] = 0x16; // 5849
+    file[0x34e] = 1; file[0x34f] = 0x40;
 
     std::memcpy(file.data() + 0x300, ".text", 6);
     std::memcpy(file.data() + 0x308, ".rdata", 7);
@@ -114,6 +121,10 @@ int main()
     if (!have(db, thunk_va, XemuXbeLabels::Type::Kernel,
               "kernel_DbgPrint")) {
         return fail("kernel ordinal resolution");
+    }
+    if (db.libraries.size() != 1 || db.libraries[0].name != "XAPILIB" ||
+        db.libraries[0].build != 5849) {
+        return fail("XBE library-version metadata");
     }
     const auto *primary = XemuXbeLabels::PrimaryAt(db, entry);
     if (primary == nullptr || primary->name != "XBE_EntryPoint") {

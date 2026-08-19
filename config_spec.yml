@@ -304,6 +304,25 @@ display:
       advanced_tree_state:
         type: bool
         default: false
+    memory_tools:
+      disassembly_pane_height:
+        type: number
+        default: 320.0
+      disassembly_full_page:
+        type: bool
+        default: true
+      disassembly_instruction_count:
+        type: integer
+        default: 32
+      follow_eip:
+        type: bool
+        default: true
+      labels_enabled:
+        type: bool
+        default: true
+      register_view:
+        type: integer
+        default: 0
   setup_nvidia_profile:
     type: bool
     default: true

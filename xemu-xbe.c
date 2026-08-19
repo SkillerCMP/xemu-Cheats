@@ -84,11 +84,13 @@ struct xbe *xemu_get_xbe_info(void)
     vaddr hdr_addr_virt = 0x10000;
 
     static struct xbe xbe = {0};
+    static uint32_t headers_capacity;
 
-    if (xbe.headers) {
-        free(xbe.headers);
-        xbe.headers = NULL;
-    }
+    /* The returned xbe/header/cert pointers are only valid for a successful
+     * call. Keep the allocated byte buffer as reusable scratch storage, but do
+     * not expose stale parsed pointers while the next header is being read. */
+    xbe.header = NULL;
+    xbe.cert = NULL;
 
     // Get physical page of headers
     hwaddr hdr_addr_phys = 0;
@@ -110,8 +112,21 @@ struct xbe *xemu_get_xbe_info(void)
         return NULL;
     }
 
-    xbe.headers = malloc(xbe.headers_len);
-    assert(xbe.headers != NULL);
+    /* Current Game polls this helper every 500 ms. Reuse the scratch allocation
+     * when it is already large enough; the complete XBE header bytes are still
+     * reread below on every call, preserving change/revision detection. Keep
+     * the historical malloc(0) behavior for a malformed zero-length header. */
+    if (xbe.headers_len == 0) {
+        free(xbe.headers);
+        xbe.headers = malloc(0);
+        headers_capacity = 0;
+        assert(xbe.headers != NULL);
+    } else if (xbe.headers == NULL || headers_capacity < xbe.headers_len) {
+        uint8_t *headers = realloc(xbe.headers, xbe.headers_len);
+        assert(headers != NULL);
+        xbe.headers = headers;
+        headers_capacity = xbe.headers_len;
+    }
 
     // Read all XBE headers
     ssize_t bytes_read = virt_dma_memory_read(hdr_addr_virt,
@@ -129,6 +144,7 @@ struct xbe *xemu_get_xbe_info(void)
     vaddr cert_addr_virt = ldl_le_p(&xbe.header->m_certificate_addr);
     if ((cert_addr_virt == 0) || ((cert_addr_virt + sizeof(struct xbe_certificate)) > (hdr_addr_virt + xbe.headers_len))) {
         // Invalid certificate header (a valid certificate is expected for official titles)
+        xbe.header = NULL;
         return NULL;
     }
     xbe.cert = (struct xbe_certificate *)(xbe.headers + cert_addr_virt - hdr_addr_virt);

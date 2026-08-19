@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+from source_test_utils import read_memory_tools_implementation
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -19,7 +20,7 @@ def main() -> int:
 
     root = pathlib.Path(args.root).resolve()
     dbg = root / "ui/xui/debug-tools"
-    memory = (dbg / "memory-tools.cc").read_text(encoding="utf-8")
+    memory = read_memory_tools_implementation(dbg)
     header = (dbg / "memory-tools.hh").read_text(encoding="utf-8")
     bridge_h = (dbg / "cheat-engine-memory.h").read_text(encoding="utf-8")
     backend = (dbg / "backend/xemu-dbg.c").read_text(encoding="utf-8")
@@ -42,10 +43,10 @@ def main() -> int:
 
     require(memory, 'ImGui::BeginTabBar("current_register_tabs")',
             "tabs inside Current Registers")
-    require(memory, 'ImGui::BeginTabItem("General")', "unchanged General tab")
-    require(memory, 'ImGui::BeginTabItem("x87 / FPU")', "x87/FPU tab")
-    require(memory, 'ImGui::BeginTabItem("MMX")', "MMX tab")
-    require(memory, 'ImGui::BeginTabItem("SSE")', "SSE tab")
+    require(memory, '"General", nullptr,', "General tab")
+    require(memory, '"x87 / FPU", nullptr,', "x87/FPU tab")
+    require(memory, '"MMX", nullptr,', "MMX tab")
+    require(memory, '"SSE", nullptr,', "SSE tab")
     require(memory, 'm_register_view = 0;', "shared General register view")
     require(memory, 'm_register_view = 1;', "shared x87/FPU register view")
     require(memory, 'm_register_view = 2;', "shared MMX register view")

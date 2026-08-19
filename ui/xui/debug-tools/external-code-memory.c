@@ -274,6 +274,7 @@ static int xemu_ext_clear_backing_range(uint32_t arena_offset, uint32_t size)
     memset(ram_ptr + XEMU_EXT_CODE_OFFSET + arena_offset, 0, size);
     memory_region_set_dirty(&xemu_ext_code_region,
                             XEMU_EXT_CODE_OFFSET + arena_offset, size);
+    xemu_cheat_notify_code_patch();
     return xemu_ext_flush_guest_translation();
 }
 
@@ -554,6 +555,7 @@ int xemu_cheat_external_code_write(uint32_t virtual_address, size_t offset,
     ram_ptr = memory_region_get_ram_ptr(&xemu_ext_code_region);
     memcpy(ram_ptr + region_offset, data, size);
     memory_region_set_dirty(&xemu_ext_code_region, region_offset, size);
+    xemu_cheat_notify_code_patch();
 
     /* Reused cave addresses must not retain an old TCG translation; WHPX uses
      * the backend CR3 reload path for the equivalent guest-translation sync. */

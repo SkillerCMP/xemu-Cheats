@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Static invariants for the v1.72 XBE label UI/integration."""
+"""Static invariants for the v1.77 XBE/.xlabel/XDK/MAP/PDB label UI/integration."""
 from __future__ import annotations
 import argparse
 from pathlib import Path
+from source_test_utils import read_memory_tools_implementation
 
 
 def need(text: str, token: str, where: str) -> None:
@@ -17,21 +18,41 @@ def main() -> int:
     dt = root / "ui/xui/debug-tools"
     meson = (dt / "meson.build").read_text()
     current = (dt / "current-game.cc").read_text()
-    mem = (dt / "memory-tools.cc").read_text()
+    mem = read_memory_tools_implementation(dt)
     labels = (dt / "xbe-labels.cc").read_text()
 
     need(meson, "'xbe-labels.cc'", "meson.build")
+    need(meson, "'label-packs.cc'", "meson.build")
+    need(meson, "'xdk-labels.cc'", "meson.build")
+    need(meson, "'map-labels.cc'", "meson.build")
+    need(meson, "'pdb-labels.cc'", "meson.build")
     need(current, "XemuXbeLabels::Build", "current-game.cc")
-    need(mem, 'ImGui::Checkbox("Labels"', "memory-tools.cc")
-    need(mem, 'ImGui::Button("LABELS")', "memory-tools.cc")
-    need(mem, 'ImGui::Button("DUMP LABELS")', "memory-tools.cc")
-    need(mem, "PrimaryLabelAt(row.virtual_address)", "memory-tools.cc")
-    need(mem, "xemu_cheat_virtual_to_physical(label.virtual_address", "memory-tools.cc")
-    need(mem, "UNMAPPED", "memory-tools.cc")
+    need(current, "ReloadLabelPacks", "current-game.cc")
+    need(current, '"XDK", "PDB", "Packs", "Cache"', "current-game.cc")
+    need(current, 'XemuXdkLabels::Process', "current-game.cc")
+    need(current, 'XemuMapLabels::ParseAndResolve', "current-game.cc")
+    need(current, 'XemuPdbLabels::ParseAndResolve', "current-game.cc")
+    need(current, 'XemuPdbLabels::ExtractXbeIdentity', "current-game.cc")
+    need(current, 'ImGui::Text("XDK Build', "current-game.cc")
+    need(mem, 'ImGui::Checkbox("Labels"', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("LABELS")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("DUMP LABELS")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("LOAD .xlabel")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("SAVE .xlabel")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("LOAD .map")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("LOAD .pdb")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("RELOAD PACKS")', "MemoryTools implementation")
+    need(mem, 'ImGui::Button("BUILD / REFRESH XDK INDEX")', "MemoryTools implementation")
+    need(mem, 'Source##label_source_filter', "MemoryTools implementation")
+    need(mem, "label_it->virtual_address == row.virtual_address", "MemoryTools implementation")
+    need(mem, "translate_label_address(label.virtual_address, physical)", "MemoryTools implementation")
+    need(mem, "UNMAPPED", "MemoryTools implementation")
     need(labels, '"~" + candidate.label_stem', "xbe-labels.cc")
     need(labels, '"kernel_"', "xbe-labels.cc")
     need(labels, 'section.name != ".text"', "xbe-labels.cc")
-    print("PASS: v1.72 XBE label UI/source invariants")
+    need(mem, 'ImGui::TableSetupColumn("Source"', "MemoryTools implementation")
+    need(mem, '"MAP", "Manual"', "MemoryTools implementation")
+    print("PASS: v1.77 XBE/.xlabel/XDK/MAP/PDB label UI/source invariants")
     return 0
 
 
