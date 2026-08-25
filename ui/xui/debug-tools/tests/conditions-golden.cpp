@@ -1,4 +1,5 @@
-#include "breakpoint-conditions.hh"
+// v2.87 current regression ownership.
+#include "addons/memory-tools/breakpoint-conditions.hh"
 
 #include <cassert>
 #include <iostream>

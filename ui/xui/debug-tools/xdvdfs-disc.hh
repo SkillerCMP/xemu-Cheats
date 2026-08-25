@@ -44,5 +44,6 @@ using Reader = std::function<bool(uint64_t offset, void *buffer, size_t size)>;
 bool Parse(const Reader &reader, uint64_t image_size, Disc &disc,
            std::string &error);
 const Entry *FindRootFile(const Disc &disc, const char *name);
+const Entry *FindEntry(const Disc &disc, const std::vector<std::string> &path);
 
 } // namespace XemuXdvdfs

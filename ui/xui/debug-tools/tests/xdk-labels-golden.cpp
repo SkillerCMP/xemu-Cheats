@@ -1,3 +1,4 @@
+// v2.87 current regression ownership.
 // Local XDK importer golden tests using a fully synthetic COFF library.
 #include "xbe-labels.hh"
 #include "xdk-labels.hh"

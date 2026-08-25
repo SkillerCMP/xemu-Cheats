@@ -1,24 +1,34 @@
 name: Release (Published)
 
+# Fork policy: post-release maintenance is manual only.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: Published release name/tag used for post-release maintenance
+        required: true
+        type: string
+      prerelease:
+        description: Treat the selected release as a pre-release
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   cleanup_prerelease:
     name: Delete pre-release
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ !inputs.prerelease }}
     uses: ./.github/workflows/delete-prerelease.yml
 
   update_website:
     name: Update website
-    if: ${{ github.repository_owner == 'xemu-project' && !github.event.release.prerelease }}
+    if: ${{ github.repository_owner == 'xemu-project' && !inputs.prerelease }}
     uses: ./.github/workflows/update-website.yml
     secrets: inherit
 
   update_ppa_snapshot:
     name: Update PPA snapshot
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ !inputs.prerelease }}
     uses: ./.github/workflows/update-ppa.yml
     with:
-      release: ${{ github.event.release.name }}
+      release: ${{ inputs.release_name }}

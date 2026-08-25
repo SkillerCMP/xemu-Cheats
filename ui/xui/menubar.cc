@@ -26,10 +26,7 @@
 #include "debug.hh"
 #include "actions.hh"
 #include "compat.hh"
-#include "debug-tools/cheat-engine.hh"
-#include "debug-tools/current-game.hh"
-#include "debug-tools/hdd-directory.hh"
-#include "debug-tools/memory-tools.hh"
+#include "debug-tools/debug-tools.hh"
 #include "update.hh"
 #include "../xemu-os-utils.h"
 
@@ -225,10 +222,7 @@ void ShowMainMenu()
             ImGui::MenuItem("Audio", NULL, &apu_window.m_is_open);
             ImGui::MenuItem("Video", NULL, &video_window.m_is_open);
             ImGui::Separator();
-            ImGui::MenuItem("Current Game", NULL, &current_game_manager.is_open);
-            ImGui::MenuItem("HDD Directory", NULL, &hdd_directory_window.is_open);
-            ImGui::MenuItem("Cheat Engine", NULL, &cheat_engine_window.is_open);
-            ImGui::MenuItem("Memory Viewer / Search", NULL, &memory_tools_window.is_open);
+            debug_tools_draw_menu_items();
 #ifdef CONFIG_RENDERDOC
             if (nv2a_dbg_renderdoc_available()) {
                 ImGui::MenuItem("RenderDoc: Capture", NULL, &g_capture_renderdoc_frame);

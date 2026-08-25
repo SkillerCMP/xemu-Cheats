@@ -185,8 +185,6 @@ int xemu_cheat_disassemble_paired(uint32_t address, int instruction_count,
  * before and after the stop location without crossing into another page. */
 int xemu_cheat_disassemble_page(uint32_t address, XemuCheatDisasmRow *rows,
                                 size_t row_capacity, size_t *row_count);
-/* Legacy newline-delimited virtual-only text helper. */
-
 #ifdef __cplusplus
 }
 #endif

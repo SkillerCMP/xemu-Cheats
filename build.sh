@@ -5,6 +5,7 @@ set -o pipefail # Will return the exit status of make if it fails
 set -o physical # Resolve symlinks when changing directory
 
 project_source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+[[ "${XEMU_DEBUG_TOOLS_BUILD_WRAPPED:-0}" == "1" || ! -f "${project_source_dir}/ui/xui/debug-tools/build-xemu.sh" ]] || exec bash "${project_source_dir}/ui/xui/debug-tools/build-xemu.sh" "$@"
 
 target_arch=$(uname -m)
 

@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [x86_64]
-        configuration: [release]
+        arch: [x86_64, arm64]
+        configuration: [debug, release]
     container:
       image: ghcr.io/xemu-project/xemu-win64-toolchain${{ matrix.arch == 'x86_64' && '-gcc:sha-2881edd' || ':sha-0d06ce8' }}
     defaults:
@@ -26,24 +26,21 @@ jobs:
       CCACHE_MAXSIZE: 512M
       LTO_CACHE_DIR: /tmp/xemu-lto-ccache
       CROSSPREFIX: ${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}-w64-mingw32.static-
+      CROSSAR: ${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}-w64-mingw32.static-${{ matrix.arch == 'arm64' && 'ar' || 'gcc-ar' }}
     steps:
     - name: Download source package
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4
       with:
         name: src
-    - name: Install build helpers
+    - name: Install curl
       run: |
         apt-get update
-        apt-get install -qy curl cmake
-    - name: Extract source package
-      run: tar -xf xemu-${{ inputs.pkg_version }}.tar.zst --strip-components=2
-    - name: Validate Debug Tools ownership
-      run: python3 ./ui/xui/debug-tools/validate-project-layout.py --root .
-    - name: Build Capstone x86 disassembler
-      run: bash ./ui/xui/debug-tools/build-capstone-windows.sh
+        apt-get install -qy curl
     - name: Install zstd
       if: ${{ matrix.arch == 'arm64' }}
       run: apt-get install zstd
+    - name: Extract source package
+      run: tar -xf xemu-${{ inputs.pkg_version }}.tar.zst --strip-components=2
     - name: Initialize compiler cache
       id: cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
@@ -77,10 +74,9 @@ jobs:
           #        failure and have llvm toolchain generate PDB directly.
           opts=()
         fi
-        opts+=(--enable-capstone)
         echo "XEMU_BUILD_OPTIONS=${opts[*]}" >> "$GITHUB_ENV"
     - name: Compile
-      run: bash ./build.sh -p win64-cross ${XEMU_BUILD_OPTIONS}
+      run: ./build.sh -p win64-cross ${XEMU_BUILD_OPTIONS}
     - name: Report ccache stats
       run: ccache -s
     - name: Upload build artifact
@@ -98,8 +94,8 @@ jobs:
     needs: build
     strategy:
       matrix:
-        arch: [x86_64]
-        configuration: [release]
+        arch: [x86_64, arm64]
+        configuration: [debug, release]
     steps:
     - name: Download artifacts
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4

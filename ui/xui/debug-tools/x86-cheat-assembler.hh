@@ -1,5 +1,5 @@
 //
-// xemu RAW Cheat Engine - compact 32-bit x86 assembler for Type-F0 caves
+// xemu RAW Cheat Engine - Keystone-backed 32-bit x86 assembler for Type-F0 caves
 //
 #pragma once
 
@@ -34,9 +34,10 @@ struct XemuCheatAsmResult {
     uint32_t temp_bytes = 0;
 };
 
-/* Assemble the intentionally-focused Intel-syntax subset used by RAW Cheat
- * Engine code caves. Numeric literals are hexadecimal by default (0x and h
- * forms are also accepted). JMP/Jcc/CALL targets may be internal labels or absolute hexadecimal addresses.
+/* Assemble Intel-syntax 32-bit x86 for RAW Cheat Engine code caves through
+ * Keystone. Numeric literals are hexadecimal by default (0x and h forms are
+ * also accepted). Normal Keystone-supported IA-32 instructions may be used;
+ * JMP/Jcc/CALL targets may be internal labels or absolute hexadecimal addresses.
  *
  * v0.1.62 additions:
  *   Label: / DD value[, value...]  -> static data attached after DEADCODE JMP
@@ -69,9 +70,8 @@ bool xemu_cheat_assemble_x86_32_at(const std::vector<XemuCheatAsmLine> &lines,
                                    XemuCheatAsmResult &result);
 
 /* Assemble one debugger Inject > Change instruction at its real guest virtual
- * address. Direct hexadecimal JMP/Jcc targets use the shortest legal encoding
- * that fits max_size (for example a nearby JNE/JMP can remain a 2-byte short
- * branch); all other syntax falls back to the normal Type-F0 assembler. */
+ * address through the same Keystone backend used by Type-F0. The instruction
+ * must fit in max_size; Keystone selects the legal encoding for the supplied EIP. */
 bool xemu_cheat_assemble_x86_32_change_instruction(
     const std::string &instruction, uint32_t address, size_t max_size,
     XemuCheatAsmResult &result);

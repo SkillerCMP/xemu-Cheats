@@ -2,8 +2,9 @@
 """Restore executable bits for tracked script files whose shebang survived checkout.
 
 This is primarily for source trees committed from Windows, where Git may record
-script files as 100644.  With --update-git-index, tracked shebang files are also
-marked executable in the temporary Git index so git archive preserves the mode.
+script files as 100644. With --update-git-index, tracked shebang files are also
+marked executable in the real Git index so git archive preserves the mode.
+--temporary-git-index exercises the same chmod path on a disposable index copy.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import argparse
 import os
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -67,15 +69,50 @@ def set_executable(path: Path) -> bool:
         return False
 
 
+def update_git_index(root: Path, rels: list[str], env=None) -> None:
+    for i in range(0, len(rels), 100):
+        batch = rels[i : i + 100]
+        if batch:
+            subprocess.run(
+                ["git", "-C", str(root), "update-index", "--chmod=+x", "--", *batch],
+                check=True, env=env,
+            )
+
+
+def temporary_index_environment(root: Path):
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--git-path", "index"],
+        check=True, stdout=subprocess.PIPE, text=True,
+    )
+    index_path = Path(result.stdout.strip())
+    if not index_path.is_absolute():
+        index_path = root / index_path
+    temp = tempfile.NamedTemporaryFile(prefix="xemu-debug-tools-index-", delete=False)
+    temp_path = Path(temp.name)
+    temp.close()
+    if index_path.is_file():
+        temp_path.write_bytes(index_path.read_bytes())
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = str(temp_path)
+    return temp_path, env
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=None, help="source tree root")
     parser.add_argument(
         "--update-git-index",
         action="store_true",
-        help="also mark tracked scripts executable in the Git index",
+        help="also mark tracked scripts executable in the real Git index",
+    )
+    parser.add_argument(
+        "--temporary-git-index",
+        action="store_true",
+        help="exercise Git index chmod updates against a temporary index copy",
     )
     args = parser.parse_args()
+    if args.update_git_index and args.temporary_git_index:
+        parser.error("choose either --update-git-index or --temporary-git-index")
 
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parents[3]
     tracked = tracked_files(root)
@@ -88,16 +125,16 @@ def main() -> int:
             scripts.append(path)
             changed += int(set_executable(path))
 
-    if args.update_git_index and tracked is not None:
-        # Do this in manageable batches and use paths relative to the repo root.
+    if tracked is not None and (args.update_git_index or args.temporary_git_index):
         rels = [str(p.relative_to(root)) for p in scripts]
-        for i in range(0, len(rels), 100):
-            batch = rels[i : i + 100]
-            if batch:
-                subprocess.run(
-                    ["git", "-C", str(root), "update-index", "--chmod=+x", "--", *batch],
-                    check=True,
-                )
+        if args.update_git_index:
+            update_git_index(root, rels)
+        else:
+            temp_index, env = temporary_index_environment(root)
+            try:
+                update_git_index(root, rels, env=env)
+            finally:
+                temp_index.unlink(missing_ok=True)
 
     print(f"Executable-bit repair: {len(scripts)} script(s) checked, {changed} file mode(s) changed.")
     return 0

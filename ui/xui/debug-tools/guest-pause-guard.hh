@@ -7,39 +7,25 @@
 //
 #pragma once
 
-#include "qemu/osdep.h"
-
-extern "C" {
-#include "system/runstate.h"
-}
-
+// Keep QEMU's osdep/runstate headers out of this C++ interface. On Windows,
+// os-win32.h defines close as qemu_close_wrap; leaking that macro through a
+// header before <fstream> can rename std::basic_filebuf::close() and break LTO
+// linking. The implementation owns the QEMU header environment instead.
 class XemuDebugGuestPauseGuard
 {
 public:
-    XemuDebugGuestPauseGuard()
-        : m_resume(runstate_is_running())
-    {
-        if (m_resume) {
-            vm_stop(RUN_STATE_PAUSED);
-        }
-    }
+    XemuDebugGuestPauseGuard();
+    ~XemuDebugGuestPauseGuard();
 
-    ~XemuDebugGuestPauseGuard()
-    {
-        Resume();
-    }
+    bool IsValid() const { return m_valid; }
 
-    void Resume()
-    {
-        if (m_resume) {
-            vm_start();
-            m_resume = false;
-        }
-    }
+    void Resume();
 
     XemuDebugGuestPauseGuard(const XemuDebugGuestPauseGuard &) = delete;
     XemuDebugGuestPauseGuard &operator=(const XemuDebugGuestPauseGuard &) = delete;
 
 private:
-    bool m_resume;
+    bool m_was_running = false;
+    bool m_resume = false;
+    bool m_valid = true;
 };

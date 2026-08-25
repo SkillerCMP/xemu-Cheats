@@ -10,6 +10,7 @@
 //
 
 #include "label-packs.hh"
+#include "label-symbol-utils.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -32,13 +33,6 @@ static std::string trim(const std::string &value)
         --last;
     }
     return value.substr(first, last - first);
-}
-
-static std::string upper(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return (char)std::toupper(ch); });
-    return value;
 }
 
 static bool parse_hex_u32(const std::string &text, uint32_t &value)
@@ -65,7 +59,7 @@ static bool parse_hex_u32(const std::string &text, uint32_t &value)
 
 static bool parse_game_id(const std::string &text, uint32_t &title_id)
 {
-    std::string value = upper(trim(text));
+    std::string value = XemuLabelSymbolUtils::upper_ascii(trim(text));
     if (value.size() >= 2 && value[0] == '0' && value[1] == 'X') {
         value.erase(0, 2);
     }
@@ -89,8 +83,8 @@ static bool parse_game_id(const std::string &text, uint32_t &title_id)
 static bool hash_matches(const std::string &wanted,
                          const std::string &current)
 {
-    std::string a = upper(trim(wanted));
-    std::string b = upper(trim(current));
+    std::string a = XemuLabelSymbolUtils::upper_ascii(trim(wanted));
+    std::string b = XemuLabelSymbolUtils::upper_ascii(trim(current));
     if (a.size() >= 2 && a[0] == '0' && a[1] == 'X') {
         a.erase(0, 2);
     }
@@ -182,7 +176,7 @@ bool Parse(const std::string &text, Pack &pack, std::string &error)
             continue;
         }
         if (!t.empty() && t.front() == '[' && t.back() == ']') {
-            in_labels = upper(t) == "[LABELS]";
+            in_labels = XemuLabelSymbolUtils::upper_ascii(t) == "[LABELS]";
             continue;
         }
         if (!in_labels && t[0] == '^') {
@@ -190,20 +184,20 @@ bool Parse(const std::string &text, Pack &pack, std::string &error)
             if (eq == std::string::npos) {
                 continue;
             }
-            const std::string lhs = upper(trim(t.substr(0, eq)));
+            const std::string lhs = XemuLabelSymbolUtils::upper_ascii(trim(t.substr(0, eq)));
             const std::string rhs = trim(t.substr(eq + 1));
             const size_t colon = rhs.find(':');
             const std::string key = colon == std::string::npos
                                         ? std::string()
-                                        : upper(trim(rhs.substr(0, colon)));
+                                        : XemuLabelSymbolUtils::upper_ascii(trim(rhs.substr(0, colon)));
             const std::string value = colon == std::string::npos
                                           ? rhs
                                           : trim(rhs.substr(colon + 1));
             if (lhs == "^1" && (key.empty() || key == "HASH")) {
-                pack.header.header_sha256 = upper(value);
+                pack.header.header_sha256 = XemuLabelSymbolUtils::upper_ascii(value);
             } else if (lhs == "^2" &&
                        (key.empty() || key == "GAMEID" || key == "GAME ID")) {
-                pack.header.game_id = upper(value);
+                pack.header.game_id = XemuLabelSymbolUtils::upper_ascii(value);
                 pack.header.title_id_valid =
                     parse_game_id(value, pack.header.title_id);
             } else if (lhs == "^3" && (key.empty() || key == "NAME")) {
@@ -212,7 +206,7 @@ bool Parse(const std::string &text, Pack &pack, std::string &error)
                        (key.empty() || key == "XBEHASH" ||
                         key == "XBE HASH" || key == "XBE_SHA256" ||
                         key == "XBE SHA-256")) {
-                pack.header.xbe_sha256 = upper(value);
+                pack.header.xbe_sha256 = XemuLabelSymbolUtils::upper_ascii(value);
             } else if (lhs == "^5" &&
                        (key.empty() || key == "FORMAT" ||
                         key == "FORMATVERSION" || key == "FORMAT VERSION")) {
@@ -305,10 +299,10 @@ bool Serialize(const Identity &identity,
     out << "; XEMU - CHEATS portable label pack\n";
     out << "; Physical addresses are intentionally not stored.\n";
     out << "; Section-relative XBE locations are the persistent label master.\n\n";
-    out << "^1 = Hash: " << upper(identity.header_sha256) << "\n";
-    out << "^2 = GameID: " << upper(identity.game_id) << "\n";
+    out << "^1 = Hash: " << XemuLabelSymbolUtils::upper_ascii(identity.header_sha256) << "\n";
+    out << "^2 = GameID: " << XemuLabelSymbolUtils::upper_ascii(identity.game_id) << "\n";
     out << "^3 = NAME: " << identity.name << "\n";
-    out << "^4 = XBEHASH: " << upper(identity.xbe_sha256) << "\n";
+    out << "^4 = XBEHASH: " << XemuLabelSymbolUtils::upper_ascii(identity.xbe_sha256) << "\n";
     out << "^5 = FORMAT: " << kFormatVersion << "\n\n";
     out << "[LABELS]\n";
     out << "; SECTION|OFFSET|VIRTUAL_HINT|TYPE|SOURCE|CONFIDENCE|LABEL\n";

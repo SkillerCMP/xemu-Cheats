@@ -12,6 +12,23 @@
 
 #include <SDL3/SDL.h>
 
+struct DetachedToolRegistration {
+    const char *title = nullptr;
+    int default_width = 900;
+    int default_height = 700;
+    int min_width = 640;
+    int min_height = 480;
+    bool *open = nullptr;
+    void (*draw)() = nullptr;
+    int order = 0;
+};
+
+// Core/additions register detached windows here so this host-window layer has
+// no direct dependency on feature headers such as HDD Directory or Memory Tools.
+void detached_tools_register(const DetachedToolRegistration &registration);
+void detached_tools_finalize_registry();
+void detached_tools_clear_registry();
+
 void detached_tools_init(SDL_Window *main_window, void *main_gl_context);
 void detached_tools_cleanup();
 bool detached_tools_process_sdl_event(SDL_Event *event);

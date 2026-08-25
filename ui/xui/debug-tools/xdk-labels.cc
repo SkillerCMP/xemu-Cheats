@@ -7,6 +7,8 @@
 //
 
 #include "xdk-labels.hh"
+#include "binary-utils.hh"
+#include "label-symbol-utils.hh"
 
 #include <algorithm>
 #include <array>
@@ -26,6 +28,12 @@
 
 namespace XemuXdkLabels {
 namespace {
+
+using XemuDebugBinaryUtils::read_le16;
+using XemuDebugBinaryUtils::read_le32;
+using XemuDebugBinaryUtils::range_inside;
+using XemuLabelSymbolUtils::lower_ascii;
+using XemuLabelSymbolUtils::upper_ascii;
 
 namespace fs = std::filesystem;
 
@@ -92,17 +100,6 @@ struct CandidateFunction {
     size_t section_index = 0;
 };
 
-static uint16_t read_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t read_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static uint64_t read_le64(const uint8_t *p)
 {
     return (uint64_t)read_le32(p) | ((uint64_t)read_le32(p + 4) << 32);
@@ -126,25 +123,6 @@ static void write_le64(std::ostream &out, uint64_t value)
 {
     write_le32(out, (uint32_t)value);
     write_le32(out, (uint32_t)(value >> 32));
-}
-
-static bool range_inside(uint64_t offset, uint64_t size, uint64_t limit)
-{
-    return offset <= limit && size <= limit - offset;
-}
-
-static std::string upper_ascii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return (char)std::toupper(ch); });
-    return value;
-}
-
-static std::string lower_ascii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return (char)std::tolower(ch); });
-    return value;
 }
 
 static uint64_t fnv1a64(const uint8_t *data, size_t size, uint64_t seed)

@@ -13,6 +13,8 @@
 //
 
 #include "xbe-labels.hh"
+#include "binary-utils.hh"
+#include "label-symbol-utils.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +27,10 @@
 
 namespace XemuXbeLabels {
 namespace {
+
+using XemuDebugBinaryUtils::read_le32;
+using XemuDebugBinaryUtils::range_inside;
+using XemuLabelSymbolUtils::upper_ascii;
 
 constexpr uint32_t kXbeMagic = 0x48454258u; // "XBEH"
 constexpr uint32_t kRetailEntryKey = 0xA8FC57ABu;
@@ -63,19 +69,6 @@ struct KernelName {
 static constexpr KernelName kKernelNames[] = {
 #include "xboxkrnl-ordinals.inc"
 };
-
-static uint32_t read_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static bool range_inside(uint64_t offset, uint64_t size, uint64_t limit)
-{
-    return offset <= limit && size <= limit - offset;
-}
 
 static bool read_u32(const std::vector<uint8_t> &file, size_t offset,
                      uint32_t &value)
@@ -304,13 +297,6 @@ static int type_priority(Type type)
     case Type::String: return 8;
     }
     return 99;
-}
-
-static std::string upper_ascii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return (char)std::toupper(ch); });
-    return value;
 }
 
 static void attach_section_locations(Database &db)

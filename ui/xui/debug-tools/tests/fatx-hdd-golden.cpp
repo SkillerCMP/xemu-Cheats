@@ -1,4 +1,5 @@
-#include "fatx-hdd.hh"
+// v2.87 current regression ownership.
+#include "addons/hdd/fatx-hdd.hh"
 
 #include <cassert>
 #include <cstdint>
@@ -43,6 +44,8 @@ uint64_t RoundUp4096(uint64_t value)
     return (value + 4095ull) & ~4095ull;
 }
 
+bool SparseRead(void *opaque, uint64_t offset, void *buffer, size_t size);
+
 uint64_t DataOffset(uint64_t partition_offset, uint64_t partition_size)
 {
     const uint64_t fat_entries = partition_size / kClusterSize + 1;
@@ -50,6 +53,23 @@ uint64_t DataOffset(uint64_t partition_offset, uint64_t partition_size)
     const uint64_t fat_size = RoundUp4096(fat_entries * (fat_bits / 8));
     return partition_offset + 4096 + fat_size;
 }
+
+void SetFatEntry(SparseImage &image, uint64_t partition_offset,
+                 uint64_t partition_size, uint32_t cluster, uint32_t value)
+{
+    const uint64_t fat_entries = partition_size / kClusterSize + 1;
+    const uint64_t fat_bits = fat_entries < 0xFFF0ull ? 16 : 32;
+    const uint64_t entry_bytes = fat_bits / 8;
+    std::vector<uint8_t> raw(entry_bytes, 0);
+    if (entry_bytes == 2) {
+        PutLe16(raw.data(), (uint16_t)value);
+    } else {
+        PutLe32(raw.data(), value);
+    }
+    image.chunks[partition_offset + 4096 + (uint64_t)cluster * entry_bytes] =
+        std::move(raw);
+}
+
 
 bool SparseRead(void *opaque, uint64_t offset, void *buffer, size_t size)
 {
@@ -69,6 +89,7 @@ bool SparseRead(void *opaque, uint64_t offset, void *buffer, size_t size)
     }
     return true;
 }
+
 
 bool VectorWrite(void *opaque, const void *buffer, size_t size)
 {
@@ -105,12 +126,13 @@ std::vector<uint8_t> Utf16Le(const char *text)
 }
 
 void AddPartitionSuperblock(SparseImage &image, uint64_t offset,
-                            uint32_t volume_id, uint32_t root_cluster)
+                            uint32_t volume_id, uint32_t root_cluster,
+                            uint32_t sectors_per_cluster = 32u)
 {
     std::vector<uint8_t> superblock(4096, 0xFF);
     PutLe32(superblock.data() + 0, 0x58544146u);
     PutLe32(superblock.data() + 4, volume_id);
-    PutLe32(superblock.data() + 8, 32u);
+    PutLe32(superblock.data() + 8, sectors_per_cluster);
     PutLe32(superblock.data() + 12, root_cluster);
     image.chunks[offset] = std::move(superblock);
 }
@@ -168,9 +190,23 @@ int main()
     const std::vector<uint8_t> save_meta = Utf16Le("Name=Save Game 1\r\n");
     std::vector<uint8_t> save(kClusterSize, 0xFF);
     AddEntry(save, 0, "SaveMeta.xbx", 0, 6, (uint32_t)save_meta.size(), date, time);
-    save[64] = 0xFF;
+    AddEntry(save, 1, "payload.bin", 0, 7, kClusterSize + 17, date, time);
+    save[2 * 64] = 0xFF;
     image.chunks[e_data + 4ull * kClusterSize] = save;
     image.chunks[e_data + 5ull * kClusterSize] = save_meta;
+
+    std::vector<uint8_t> payload_a(kClusterSize, 0xA5);
+    std::vector<uint8_t> payload_b(17, 0x5A);
+    image.chunks[e_data + 6ull * kClusterSize] = payload_a;
+    image.chunks[e_data + 7ull * kClusterSize] = payload_b;
+
+    // FAT chains used by the v2.04 delete test. E: is FAT32 in the retail
+    // layout. Directories and single-cluster files terminate at 0xFFFFFFFF;
+    // payload.bin spans clusters 7 -> 8.
+    for (uint32_t cluster : {1u, 2u, 3u, 4u, 5u, 6u, 8u}) {
+        SetFatEntry(image, kEOffset, kESize, cluster, 0xFFFFFFFFu);
+    }
+    SetFatEntry(image, kEOffset, kESize, 7u, 8u);
 
     XemuFatxHdd::Snapshot snapshot;
     const bool ok = XemuFatxHdd::BuildSnapshot(
@@ -209,6 +245,26 @@ int main()
     assert(stream_error.empty());
     assert(exported == foo_data);
 
+    // v2.42 sequential cursor must remember previously visited clusters
+    // across calls. A 2 -> 2 FAT cycle must be rejected on the second chunk
+    // rather than repeatedly returning the same cluster as new file data.
+    XemuFatxHdd::Entry cyclic = c->entries[0];
+    cyclic.first_cluster = 2;
+    cyclic.file_size = kClusterSize * 2;
+    SetFatEntry(image, kCOffset, kCSize, 2u, 2u);
+    XemuFatxHdd::FileReadCursor cyclic_cursor;
+    std::vector<uint8_t> cyclic_chunk;
+    std::string cyclic_error;
+    assert(XemuFatxHdd::ReadFileRangeSequential(
+        SparseRead, &image, kRetailDiskSize, *c, cyclic, 0, kClusterSize,
+        cyclic_cursor, cyclic_chunk, cyclic_error));
+    assert(cyclic_chunk.size() == kClusterSize);
+    assert(!XemuFatxHdd::ReadFileRangeSequential(
+        SparseRead, &image, kRetailDiskSize, *c, cyclic, kClusterSize,
+        kClusterSize, cyclic_cursor, cyclic_chunk, cyclic_error));
+    assert(cyclic_error.find("cycle") != std::string::npos);
+    SetFatEntry(image, kCOffset, kCSize, 2u, 0xFFFFu);
+
     std::string metadata_warning;
     assert(XemuFatxHdd::PopulateXboxMetadata(
         SparseRead, &image, kRetailDiskSize, snapshot, metadata_warning));
@@ -224,12 +280,60 @@ int main()
     assert(save_dir && save_dir->friendly_name == "Save Game 1");
     assert(XemuFatxHdd::DisplayName(*save_dir) == "565190C2C935 - Save Game 1");
 
+    assert(save_dir->children.size() == 2);
+    // v2.32: production FATX mutation has been decommissioned. Parser,
+    // metadata, export, targeted snapshots and kernel-RPC planning remain
+    // covered here; destructive behavior is tested at the kernel-RPC layer.
+
     for (const auto &part : snapshot.partitions) {
         if (part.letter != 'C' && part.letter != 'E') {
             assert(!part.available);
         }
     }
 
-    std::cout << "PASS: FATX HDD parser metadata + stream export\n";
+    // v2.19: XBP/LBA48 v3 sector-0 table is authoritative for F/G. The
+    // parser must not let F consume G's range.
+    SparseImage extended;
+    constexpr uint32_t f_start = (uint32_t)(kRetailDiskSize / 512ull);
+    constexpr uint32_t f_sectors = 0x00020000u; // 64 MiB
+    constexpr uint32_t g_start = f_start + f_sectors;
+    constexpr uint32_t g_sectors = 0x00020000u; // 64 MiB
+    constexpr uint64_t f_offset = (uint64_t)f_start * 512ull;
+    constexpr uint64_t f_size = (uint64_t)f_sectors * 512ull;
+    constexpr uint64_t g_offset = (uint64_t)g_start * 512ull;
+    constexpr uint64_t g_size = (uint64_t)g_sectors * 512ull;
+    constexpr uint64_t extended_image_size = g_offset + g_size;
+
+    std::vector<uint8_t> xbp(512, 0);
+    std::memcpy(xbp.data(), "****PARTINFO****", 16);
+    auto add_xbp = [&](size_t index, const char *name, uint32_t start, uint32_t sectors) {
+        uint8_t *raw = xbp.data() + 0x30 + index * 0x20;
+        std::memset(raw, ' ', 16);
+        std::memcpy(raw, name, std::min<size_t>(16, std::strlen(name)));
+        PutLe32(raw + 16, 0x80000000u);
+        PutLe32(raw + 20, start);
+        PutLe32(raw + 24, sectors);
+    };
+    add_xbp(5, "XBOX F", f_start, f_sectors);
+    add_xbp(6, "XBOX G", g_start, g_sectors);
+    extended.chunks[0] = xbp;
+
+    AddPartitionSuperblock(extended, f_offset, 0xF00DF00Du, 1u, 32u);
+    AddPartitionSuperblock(extended, g_offset, 0x600D600Du, 1u, 32u);
+    std::vector<uint8_t> empty_cluster(kClusterSize, 0xFF);
+    extended.chunks[DataOffset(f_offset, f_size)] = empty_cluster;
+    extended.chunks[DataOffset(g_offset, g_size)] = empty_cluster;
+
+    XemuFatxHdd::Snapshot extended_snapshot;
+    assert(XemuFatxHdd::BuildSnapshot(SparseRead, &extended, extended_image_size,
+                                      extended_snapshot));
+    const XemuFatxHdd::Partition *f = XemuFatxHdd::FindPartition(extended_snapshot, 'F');
+    const XemuFatxHdd::Partition *g = XemuFatxHdd::FindPartition(extended_snapshot, 'G');
+    assert(f && f->available && g && g->available);
+    assert(f->offset == f_offset && f->size == f_size);
+    assert(g->offset == g_offset && g->size == g_size);
+    assert(f->offset + f->size <= g->offset);
+
+    std::cout << "PASS: FATX HDD parser metadata + export + targeted snapshots + XBP F/G core\n";
     return 0;
 }

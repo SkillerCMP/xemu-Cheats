@@ -47,6 +47,7 @@ public:
     bool is_open = false;
 
     void Refresh(bool force = false);
+    void RefreshRunningXbe(bool force = false);
     void Draw(bool detached = false);
     void DrawInlineSummary(const char *id) const;
 
@@ -60,16 +61,9 @@ public:
         return XemuXbeLabels::PrimaryAt(m_labels, virtual_address);
     }
     const std::string &LabelStatus() const { return m_label_status; }
-    const std::vector<std::string> &LoadedLabelPacks() const
-    {
-        return m_loaded_label_packs;
-    }
     const XemuXdkLabels::Status &XdkStatus() const { return m_xdk_status; }
     const XemuMapLabels::Status &MapStatus() const { return m_map_status; }
-    const std::string &LoadedMapPath() const { return m_loaded_map_path; }
     const XemuPdbLabels::Status &PdbStatus() const { return m_pdb_status; }
-    const std::string &LoadedPdbPath() const { return m_loaded_pdb_path; }
-    const XemuPdbLabels::Identity &XbePdbIdentity() const { return m_xbe_pdb_identity; }
 
     std::string LabelRootDirectory() const;
     std::string LabelPackDirectory() const;
@@ -95,6 +89,7 @@ private:
     uint64_t m_last_refresh_ms = 0;
     XemuXdvdfs::Disc m_disc;
     std::string m_disc_status;
+    std::string m_disc_export_status;
     XemuXbeLabels::Database m_labels;
     uint64_t m_label_generation = 0;
     XemuXbeLabels::Database m_auto_labels;
@@ -120,10 +115,14 @@ private:
     uintptr_t m_disc_backend_identity = 0;
     int64_t m_disc_image_size = 0;
 
+    void RefreshInternal(bool force, bool refresh_disc);
     void RefreshDisc(bool force);
     void DrawGameInfoTab(bool detached);
     void DrawDiscContentsTab();
-    static void DrawDiscEntry(const XemuXdvdfs::Entry &entry);
+    void DrawDiscEntry(const XemuXdvdfs::Entry &entry,
+                       std::vector<std::string> &path);
+    void RequestDiscExport(const XemuXdvdfs::Entry &entry,
+                           const std::vector<std::string> &path);
     static std::string FormatByteSize(uint64_t bytes);
 
     XemuLabelPacks::Identity CurrentLabelIdentity() const;

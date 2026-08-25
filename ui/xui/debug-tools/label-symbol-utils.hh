@@ -19,6 +19,21 @@
 
 namespace XemuLabelSymbolUtils {
 
+inline std::string upper_ascii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return (char)std::toupper(ch); });
+    return value;
+}
+
+
+inline std::string lower_ascii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return (char)std::tolower(ch); });
+    return value;
+}
+
 inline bool all_digits(const std::string &value)
 {
     return !value.empty() &&
@@ -114,6 +129,46 @@ inline std::string simple_msvc_name(const std::string &name)
     out += function;
     return out;
 }
+
+inline bool compiler_internal_symbol(const std::string &name)
+{
+    return name.empty() || name.front() == '$' ||
+           name.rfind("_$", 0) == 0 ||
+           name.rfind("__safe_se_handler_", 0) == 0;
+}
+
+inline std::string display_microsoft_symbol(const std::string &name)
+{
+    if (compiler_internal_symbol(name)) {
+        return {};
+    }
+    if (name.front() == '?') {
+        const std::string pretty = simple_msvc_name(name);
+        return pretty.empty() ? name : pretty;
+    }
+    return clean_c_symbol(name);
+}
+
+template <typename Label>
+inline void sort_and_dedupe_labels(std::vector<Label> &labels)
+{
+    std::sort(labels.begin(), labels.end(), [](const auto &a, const auto &b) {
+        if (a.virtual_address != b.virtual_address) {
+            return a.virtual_address < b.virtual_address;
+        }
+        if (a.type != b.type) {
+            return (int)a.type < (int)b.type;
+        }
+        return a.name < b.name;
+    });
+    labels.erase(std::unique(labels.begin(), labels.end(),
+                             [](const auto &a, const auto &b) {
+                                 return a.virtual_address == b.virtual_address &&
+                                        a.type == b.type && a.name == b.name;
+                             }),
+                 labels.end());
+}
+
 
 } // namespace XemuLabelSymbolUtils
 

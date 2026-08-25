@@ -23,7 +23,9 @@
 #include "../xemu-snapshots.h"
 #include "../xemu-notifications.h"
 #include "snapshot-manager.hh"
+#include "debug-tools/debug-tools.hh"
 #include <filesystem>
+
 
 void ActionEjectDisc(void)
 {
@@ -78,6 +80,7 @@ void ActionTogglePause(void)
 
 void ActionReset(void)
 {
+    debug_tools_notify_game_reset();
     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
 }
 

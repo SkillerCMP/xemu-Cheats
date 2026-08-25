@@ -10,6 +10,7 @@
 //
 
 #include "xdvdfs-disc.hh"
+#include "binary-utils.hh"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,10 @@
 
 namespace XemuXdvdfs {
 namespace {
+
+using XemuDebugBinaryUtils::read_le16;
+using XemuDebugBinaryUtils::read_le32;
+using XemuDebugBinaryUtils::range_inside;
 
 constexpr uint64_t kSectorSize = 0x800;
 constexpr uint64_t kVolumeDescriptorOffset = 0x10000;
@@ -39,24 +44,6 @@ constexpr std::array<uint64_t, 4> kFilesystemBases = {
     0x02080000ull,
     0x18300000ull,
 };
-
-static uint16_t read_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t read_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static bool range_inside(uint64_t offset, uint64_t size, uint64_t limit)
-{
-    return offset <= limit && size <= limit - offset;
-}
 
 static std::string safe_name(const uint8_t *p, size_t len)
 {
@@ -279,6 +266,34 @@ const Entry *FindRootFile(const Disc &disc, const char *name)
         }
     }
     return nullptr;
+}
+
+const Entry *FindEntry(const Disc &disc, const std::vector<std::string> &path)
+{
+    if (path.empty()) {
+        return nullptr;
+    }
+    const std::vector<Entry> *entries = &disc.root_entries;
+    const Entry *found = nullptr;
+    for (size_t depth = 0; depth < path.size(); ++depth) {
+        found = nullptr;
+        for (const Entry &entry : *entries) {
+            if (ascii_equal_case_insensitive(entry.name, path[depth].c_str())) {
+                found = &entry;
+                break;
+            }
+        }
+        if (!found) {
+            return nullptr;
+        }
+        if (depth + 1 < path.size()) {
+            if (!found->IsDirectory()) {
+                return nullptr;
+            }
+            entries = &found->children;
+        }
+    }
+    return found;
 }
 
 } // namespace XemuXdvdfs

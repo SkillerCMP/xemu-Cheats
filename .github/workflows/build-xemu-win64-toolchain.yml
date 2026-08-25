@@ -1,14 +1,8 @@
 name: Build xemu-win64-toolchain
 
+# Fork policy: keep GitHub Actions opt-in. Run this workflow manually when needed.
 on:
-  push:
-    paths:
-      - '.github/workflows/build-xemu-win64-toolchain.yml'
-      - 'ubuntu-win64-cross/**'
-  pull_request:
-    paths:
-      - '.github/workflows/build-xemu-win64-toolchain.yml'
-      - 'ubuntu-win64-cross/**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -51,6 +52,7 @@ public:
 
     void Draw(bool detached = false);
     void Tick();
+    void NotifyGameResetRequested();
     const std::vector<FTempBankInfo> &GetActiveF0TempBanks() const;
 
     /* x86 Debugger Inject > CodeCave uses the exact Type-F0 assembler,
@@ -66,6 +68,12 @@ private:
     enum class GuestAddressSpace {
         Physical,
         Virtual,
+    };
+
+    enum class PreEntryLifecycle {
+        Idle,
+        ResetRequested,
+        ApplyPending,
     };
 
     struct RawCode {
@@ -104,7 +112,12 @@ private:
         std::string credits;
         bool selected = false;
         bool enabled = false;
+        bool preentry = false;
+        bool preentry_applied = false;
+        std::string preentry_error;
         int group_index = 0;
+        std::string group_path;
+        uint32_t identity_ordinal = 0;
         std::vector<RawCode> codes;
     };
 
@@ -159,16 +172,25 @@ private:
     bool m_code_aware_skip = false;
     bool m_auto_load_current_game = true;
     bool m_live_cheats_enabled = false;
+    bool m_seen_game_valid = false;
+    bool m_force_forget_f_hooks_on_next_game_observation = false;
+    PreEntryLifecycle m_preentry_lifecycle = PreEntryLifecycle::Idle;
     bool m_show_help = false;
     std::string m_source;
     std::vector<CheatBlock> m_blocks;
     std::vector<CheatGroup> m_groups;
     std::vector<std::string> m_parse_messages;
     std::string m_last_runtime_message;
+    std::string m_last_preentry_message;
     std::string m_file_status;
     std::string m_loaded_path;
     uint64_t m_seen_game_generation = UINT64_MAX;
+    std::string m_seen_game_identity;
     std::unordered_map<uint64_t, SwitchState> m_switches;
+    /* Only selected PREENTRY identities need session persistence: absence means
+     * unselected. The key includes code-file path, group path, and block name so
+     * duplicate Patch names in different groups/games do not share selection. */
+    std::unordered_set<std::string> m_selected_preentry_keys;
     std::unordered_map<uint64_t, FHookState> m_f_hooks;
     /* A disabled/replaced F0 may still be executing in its old cave (or have
      * a saved resume EIP pending into it). Detach those allocations from the hook
@@ -228,12 +250,21 @@ private:
                             GuestAddressSpace active_space, uint32_t active_base,
                             size_t &next_index);
     void MaybeAutoLoadCurrentGame();
+    void ObserveRequestedGameReset();
+    void ApplySelectedPreEntryPatches();
+    std::string BlockIdentityKey(const CheatBlock &block) const;
+    std::string PreEntrySelectionKey(const CheatBlock &block) const;
+    bool IsPreEntrySelected(const CheatBlock &block) const;
+    void RememberPreEntrySelection(CheatBlock &block);
     bool LoadMatchingCurrentGameFile(bool force_reload = false);
     bool LoadSourceFile(const std::string &path);
     std::string CheatDirectory() const;
     void DrawGroup(int group_index);
+    void DrawPatchGroup(int group_index);
     void DrawCheat(size_t block_index);
+    void DrawPatch(size_t block_index);
     void SetGroupSelected(int group_index, bool selected);
+    void SetPatchGroupSelected(int group_index, bool selected);
     void SetLiveCheatsEnabled(bool enabled);
     void DisableAllCheats(bool clear_selection);
     void DrawMenuBar();
@@ -245,6 +276,8 @@ private:
     std::string SuggestedCurrentCheatPath() const;
     void CountGroupSelection(int group_index, size_t &selected,
                              size_t &total) const;
+    void CountPatchGroupSelection(int group_index, size_t &selected,
+                                  size_t &total) const;
 
     bool ReadGuest(GuestAddressSpace space, uint32_t address,
                    void *buffer, size_t size);
@@ -277,7 +310,9 @@ private:
     void ReleaseRetiredFHooks();
     void DeactivateFHook(uint64_t key);
     void DeactivateFHooksForBlock(size_t owner_block);
+    void DeactivateLiveFHooks();
     void DeactivateAllFHooks();
+    void ForgetFHookOwnershipForNewGuest();
 
     static bool ParseCodeLine(const std::string &line, RawCode &out,
                               int source_line);
@@ -287,6 +322,7 @@ private:
                             const std::string &current_hash);
     static std::string Trim(const std::string &s);
     static std::string Upper(const std::string &s);
+    static bool ConsumePreEntryPrefix(std::string &spec);
     static std::string NormalizeTypeFLine(const std::string &line);
     static std::string TypeFDirective(const std::string &line);
     static bool ParseDeadcodeCount(const std::string &text, uint8_t &out);

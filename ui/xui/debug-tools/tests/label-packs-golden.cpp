@@ -1,3 +1,4 @@
+// v2.87 current regression ownership.
 // Portable .xlabel label-pack golden tests.
 #include "label-packs.hh"
 

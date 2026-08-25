@@ -1,12 +1,8 @@
 name: CI
 
+# Fork policy: CI is available on demand but never starts on push/PR.
 on:
-  pull_request:
-  push:
-    branches-ignore:
-      - master
-    tags-ignore:
-      - "v*"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

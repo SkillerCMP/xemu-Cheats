@@ -1,4 +1,5 @@
-#include "register-copy-utils.hh"
+// v2.87 current regression ownership.
+#include "addons/memory-tools/register-copy-utils.hh"
 
 #include <cstdlib>
 #include <iostream>

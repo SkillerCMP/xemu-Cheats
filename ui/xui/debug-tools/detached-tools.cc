@@ -12,12 +12,9 @@
 #include "detached-tools.hh"
 
 #include "../common.hh"
-#include "cheat-engine.hh"
-#include "current-game.hh"
-#include "hdd-directory.hh"
-#include "memory-tools.hh"
-
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 namespace {
 
@@ -29,6 +26,7 @@ struct DetachedToolWindow {
     int min_height = 480;
     bool *open = nullptr;
     void (*draw)() = nullptr;
+    int order = 0;
 
     SDL_Window *window = nullptr;
     SDL_GLContext gl_context = nullptr;
@@ -42,64 +40,7 @@ SDL_GLContext g_main_gl_context = nullptr;
 ImGuiContext *g_main_imgui_context = nullptr;
 SDL_Cursor *g_detached_default_cursor = nullptr;
 
-void DrawCheatEngine()
-{
-    cheat_engine_window.Draw(true);
-}
-
-void DrawMemoryTools()
-{
-    memory_tools_window.Draw(true);
-}
-
-void DrawCurrentGame()
-{
-    current_game_manager.Draw(true);
-}
-
-void DrawHddDirectory()
-{
-    hdd_directory_window.Draw(true);
-}
-
-DetachedToolWindow g_cheat_tool = {
-    "xemu - RAW Cheat Engine",
-    980, 760,
-    720, 520,
-    &cheat_engine_window.is_open,
-    DrawCheatEngine,
-};
-
-DetachedToolWindow g_memory_tool = {
-    "xemu - Memory Viewer / Search / x86 Debugger",
-    1320, 860,
-    900, 620,
-    &memory_tools_window.is_open,
-    DrawMemoryTools,
-};
-
-DetachedToolWindow g_current_game_tool = {
-    "xemu - Current Game",
-    900, 620,
-    700, 480,
-    &current_game_manager.is_open,
-    DrawCurrentGame,
-};
-
-DetachedToolWindow g_hdd_tool = {
-    "xemu - Xbox HDD Directory",
-    1100, 760,
-    760, 520,
-    &hdd_directory_window.is_open,
-    DrawHddDirectory,
-};
-
-DetachedToolWindow *g_tools[] = {
-    &g_cheat_tool,
-    &g_memory_tool,
-    &g_current_game_tool,
-    &g_hdd_tool,
-};
+std::vector<DetachedToolWindow> g_tools;
 
 void EnsureDesktopCursor(DetachedToolWindow &tool)
 {
@@ -320,6 +261,49 @@ void RenderToolFrame(DetachedToolWindow &tool)
 
 } // namespace
 
+void detached_tools_register(const DetachedToolRegistration &registration)
+{
+    if (!registration.title || !registration.open || !registration.draw) {
+        return;
+    }
+
+    auto existing = std::find_if(
+        g_tools.begin(), g_tools.end(),
+        [&](const DetachedToolWindow &tool) {
+            return tool.open == registration.open;
+        });
+    if (existing != g_tools.end()) {
+        return;
+    }
+
+    DetachedToolWindow tool;
+    tool.title = registration.title;
+    tool.default_width = registration.default_width;
+    tool.default_height = registration.default_height;
+    tool.min_width = registration.min_width;
+    tool.min_height = registration.min_height;
+    tool.open = registration.open;
+    tool.draw = registration.draw;
+    tool.order = registration.order;
+    g_tools.push_back(tool);
+}
+
+void detached_tools_finalize_registry()
+{
+    std::stable_sort(g_tools.begin(), g_tools.end(),
+                     [](const DetachedToolWindow &a,
+                        const DetachedToolWindow &b) {
+                         return a.order < b.order;
+                     });
+}
+
+void detached_tools_clear_registry()
+{
+    // Registry ownership is reset only after detached_tools_cleanup() destroys
+    // all SDL/OpenGL/ImGui resources held by the entries.
+    g_tools.clear();
+}
+
 void detached_tools_init(SDL_Window *main_window, void *main_gl_context)
 {
     g_main_window = main_window;
@@ -333,8 +317,8 @@ void detached_tools_init(SDL_Window *main_window, void *main_gl_context)
 
 void detached_tools_cleanup()
 {
-    for (DetachedToolWindow *tool : g_tools) {
-        DestroyToolWindow(*tool);
+    for (DetachedToolWindow &tool : g_tools) {
+        DestroyToolWindow(tool);
     }
     if (g_detached_default_cursor) {
         SDL_DestroyCursor(g_detached_default_cursor);
@@ -353,16 +337,16 @@ bool detached_tools_process_sdl_event(SDL_Event *event)
     }
 
     SDL_Window *event_window = SDL_GetWindowFromEvent(event);
-    for (DetachedToolWindow *tool : g_tools) {
-        if (!tool->window || !tool->imgui_context ||
-            event_window != tool->window) {
+    for (DetachedToolWindow &tool : g_tools) {
+        if (!tool.window || !tool.imgui_context ||
+            event_window != tool.window) {
             continue;
         }
 
         // A detached tool owns this event. Do not feed the same SDL event to
         // the main xemu ImGui backend as well: the main backend can otherwise
         // apply its captured/hidden cursor state to the desktop tool window.
-        ImGui::SetCurrentContext(tool->imgui_context);
+        ImGui::SetCurrentContext(tool.imgui_context);
         ImGui_ImplSDL3_ProcessEvent(event);
 
         switch (event->type) {
@@ -375,19 +359,19 @@ bool detached_tools_process_sdl_event(SDL_Event *event)
             // xemu's game window may intentionally hide the process-global SDL
             // cursor while the guest owns the mouse. Force a normal desktop
             // pointer whenever input belongs to one of our detached tools.
-            EnsureDesktopCursor(*tool);
+            EnsureDesktopCursor(tool);
             break;
         default:
             break;
         }
 
         if (event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-            if (tool->open) {
-                *tool->open = false;
+            if (tool.open) {
+                *tool.open = false;
             }
-            SDL_HideWindow(tool->window);
-            tool->shown = false;
-            tool->frame_ready = false;
+            SDL_HideWindow(tool.window);
+            tool.shown = false;
+            tool.frame_ready = false;
         }
 
         if (g_main_imgui_context) {
@@ -408,8 +392,8 @@ bool detached_tools_owns_window_id(SDL_WindowID window_id)
         return false;
     }
 
-    for (DetachedToolWindow *tool : g_tools) {
-        if (tool->window && SDL_GetWindowID(tool->window) == window_id) {
+    for (DetachedToolWindow &tool : g_tools) {
+        if (tool.window && SDL_GetWindowID(tool.window) == window_id) {
             return true;
         }
     }
@@ -418,16 +402,16 @@ bool detached_tools_owns_window_id(SDL_WindowID window_id)
 
 void detached_tools_build_frames()
 {
-    for (DetachedToolWindow *tool : g_tools) {
-        BuildToolFrame(*tool);
+    for (DetachedToolWindow &tool : g_tools) {
+        BuildToolFrame(tool);
     }
     RestoreMainContexts();
 }
 
 void detached_tools_render_frames()
 {
-    for (DetachedToolWindow *tool : g_tools) {
-        RenderToolFrame(*tool);
+    for (DetachedToolWindow &tool : g_tools) {
+        RenderToolFrame(tool);
     }
     RestoreMainContexts();
 }

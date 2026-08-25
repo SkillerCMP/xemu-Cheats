@@ -1,11 +1,16 @@
 name: Release (Tag Pushed)
 
+# Fork policy: tagged releases are manual only.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -14,5 +19,5 @@ jobs:
     if: github.repository_owner == 'xemu-project'
     uses: ./.github/workflows/release.yml
     with:
-      ref: ${{ github.ref_name }}
-      tag: ${{ github.ref_name }}
+      ref: ${{ inputs.tag }}
+      tag: ${{ inputs.tag }}

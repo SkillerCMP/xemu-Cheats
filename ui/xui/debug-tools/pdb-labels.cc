@@ -10,6 +10,7 @@
 //
 
 #include "pdb-labels.hh"
+#include "binary-utils.hh"
 #include "label-symbol-utils.hh"
 
 #include <algorithm>
@@ -23,6 +24,10 @@
 namespace XemuPdbLabels {
 namespace {
 
+using XemuDebugBinaryUtils::read_le16;
+using XemuDebugBinaryUtils::read_le32;
+using XemuDebugBinaryUtils::range_inside;
+
 constexpr char kMsfMagic[32] = {
     'M','i','c','r','o','s','o','f','t',' ','C','/','C','+','+',' ','M','S','F',' ',
     '7','.','0','0','\r','\n',0x1a,'D','S',0,0,0
@@ -34,25 +39,9 @@ constexpr size_t kMaxStreams = 65536;
 constexpr size_t kMaxPdbSymbols = 500000;
 constexpr size_t kMaxPdbBytes = 512ull * 1024ull * 1024ull;
 
-static uint16_t le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static int32_t sle32(const uint8_t *p)
 {
-    return (int32_t)le32(p);
-}
-
-static bool range_inside(uint64_t offset, uint64_t size, uint64_t total)
-{
-    return offset <= total && size <= total - offset;
+    return (int32_t)read_le32(p);
 }
 
 static bool valid_block_size(uint32_t value)
@@ -74,10 +63,10 @@ public:
             return false;
         }
 
-        m_block_size = le32(file.data() + 32);
-        const uint32_t num_blocks = le32(file.data() + 40);
-        const uint32_t directory_bytes = le32(file.data() + 44);
-        const uint32_t block_map = le32(file.data() + 52);
+        m_block_size = read_le32(file.data() + 32);
+        const uint32_t num_blocks = read_le32(file.data() + 40);
+        const uint32_t directory_bytes = read_le32(file.data() + 44);
+        const uint32_t block_map = read_le32(file.data() + 52);
         if (!valid_block_size(m_block_size) || num_blocks == 0 ||
             (uint64_t)num_blocks * m_block_size != file.size() ||
             directory_bytes < 4 || directory_bytes > file.size() ||
@@ -103,7 +92,7 @@ public:
         std::vector<uint8_t> directory;
         directory.reserve(directory_bytes);
         for (uint32_t i = 0; i < directory_block_count; ++i) {
-            const uint32_t block = le32(file.data() + map_offset + i * 4);
+            const uint32_t block = read_le32(file.data() + map_offset + i * 4);
             if (block >= num_blocks) {
                 error = "PDB stream directory references an invalid block.";
                 return false;
@@ -120,7 +109,7 @@ public:
             error = "PDB stream directory is truncated.";
             return false;
         }
-        const uint32_t stream_count = le32(directory.data());
+        const uint32_t stream_count = read_le32(directory.data());
         pos = 4;
         if (stream_count == 0 || stream_count > kMaxStreams ||
             !range_inside(pos, (uint64_t)stream_count * 4, directory.size())) {
@@ -129,7 +118,7 @@ public:
         }
         m_sizes.resize(stream_count);
         for (uint32_t i = 0; i < stream_count; ++i) {
-            m_sizes[i] = le32(directory.data() + pos);
+            m_sizes[i] = read_le32(directory.data() + pos);
             pos += 4;
         }
         m_blocks.resize(stream_count);
@@ -145,7 +134,7 @@ public:
             }
             m_blocks[i].reserve(count);
             for (uint32_t j = 0; j < count; ++j) {
-                const uint32_t block = le32(directory.data() + pos);
+                const uint32_t block = read_le32(directory.data() + pos);
                 pos += 4;
                 if (block >= num_blocks) {
                     error = "PDB stream references an invalid block.";
@@ -222,25 +211,13 @@ static bool ascii_iequals(const std::string &a, const std::string &b)
     return true;
 }
 
-static bool compiler_internal_symbol(const std::string &name)
-{
-    return name.empty() || name.front() == '$' ||
-           name.rfind("_$", 0) == 0 ||
-           name.rfind("__safe_se_handler_", 0) == 0 ||
-           name.rfind("___@@_PchSym_", 0) == 0 ||
-           name.rfind("??_C@", 0) == 0;
-}
-
 static std::string display_symbol(const std::string &name)
 {
-    if (compiler_internal_symbol(name)) {
+    if (name.rfind("___@@_PchSym_", 0) == 0 ||
+        name.rfind("??_C@", 0) == 0) {
         return {};
     }
-    if (name.front() == '?') {
-        const std::string pretty = XemuLabelSymbolUtils::simple_msvc_name(name);
-        return pretty.empty() ? name : pretty;
-    }
-    return XemuLabelSymbolUtils::clean_c_symbol(name);
+    return XemuLabelSymbolUtils::display_microsoft_symbol(name);
 }
 
 static bool parse_pdb_header(const MsfFile &msf, Identity &identity,
@@ -255,7 +232,7 @@ static bool parse_pdb_header(const MsfFile &msf, Identity &identity,
     }
     identity = {};
     identity.valid = true;
-    identity.age = le32(stream.data() + 8);
+    identity.age = read_le32(stream.data() + 8);
     std::copy_n(stream.data() + 12, identity.guid.size(), identity.guid.begin());
     return true;
 }
@@ -277,8 +254,8 @@ static bool parse_dbi(const MsfFile &msf, uint32_t &sym_stream,
         return false;
     }
 
-    age = le32(dbi.data() + 8);
-    sym_stream = le16(dbi.data() + 20);
+    age = read_le32(dbi.data() + 8);
+    sym_stream = read_le16(dbi.data() + 20);
     const int32_t mod_size = sle32(dbi.data() + 24);
     const int32_t contrib_size = sle32(dbi.data() + 28);
     const int32_t section_map_size = sle32(dbi.data() + 32);
@@ -286,7 +263,7 @@ static bool parse_dbi(const MsfFile &msf, uint32_t &sym_stream,
     const int32_t type_server_size = sle32(dbi.data() + 40);
     const int32_t optional_size = sle32(dbi.data() + 48);
     const int32_t ec_size = sle32(dbi.data() + 52);
-    machine = le16(dbi.data() + 58);
+    machine = read_le16(dbi.data() + 58);
     if (mod_size < 0 || contrib_size < 0 || section_map_size < 0 ||
         source_size < 0 || type_server_size < 0 || optional_size < 0 ||
         ec_size < 0 || sym_stream == kInvalidStream ||
@@ -305,7 +282,7 @@ static bool parse_dbi(const MsfFile &msf, uint32_t &sym_stream,
         return false;
     }
     const uint16_t section_header_stream =
-        le16(dbi.data() + optional_offset + 5 * 2);
+        read_le16(dbi.data() + optional_offset + 5 * 2);
     if (section_header_stream == kInvalidStream ||
         section_header_stream >= msf.StreamCount()) {
         error = "PDB does not contain an original executable section-header stream.";
@@ -330,8 +307,8 @@ static bool parse_dbi(const MsfFile &msf, uint32_t &sym_stream,
         }
         PdbSection section;
         section.name.assign(reinterpret_cast<const char *>(rec), name_len);
-        section.virtual_size = le32(rec + 8);
-        section.rva = le32(rec + 12);
+        section.virtual_size = read_le32(rec + 8);
+        section.rva = read_le32(rec + 12);
         sections.push_back(std::move(section));
     }
     return true;
@@ -352,8 +329,8 @@ static bool parse_public_symbols(const MsfFile &msf, uint32_t sym_stream,
             error = "PDB CodeView symbol stream ends with a truncated record.";
             return false;
         }
-        const uint16_t record_length = le16(bytes.data() + pos);
-        const uint16_t kind = le16(bytes.data() + pos + 2);
+        const uint16_t record_length = read_le16(bytes.data() + pos);
+        const uint16_t kind = read_le16(bytes.data() + pos + 2);
         if (record_length < 2 ||
             !range_inside(pos + 2, record_length, bytes.size())) {
             error = "PDB CodeView symbol record length is invalid.";
@@ -367,9 +344,9 @@ static bool parse_public_symbols(const MsfFile &msf, uint32_t sym_stream,
                 return false;
             }
             PublicSymbol symbol;
-            symbol.flags = le32(bytes.data() + data_off);
-            symbol.offset = le32(bytes.data() + data_off + 4);
-            symbol.segment = le16(bytes.data() + data_off + 8);
+            symbol.flags = read_le32(bytes.data() + data_off);
+            symbol.offset = read_le32(bytes.data() + data_off + 4);
+            symbol.segment = read_le16(bytes.data() + data_off + 8);
             const char *name = reinterpret_cast<const char *>(bytes.data() + data_off + 10);
             const size_t max_name = record_end - (data_off + 10);
             const void *nul = std::memchr(name, 0, max_name);
@@ -446,8 +423,8 @@ std::string FormatGuid(const std::array<uint8_t, 16> &guid)
     char text[64];
     std::snprintf(text, sizeof(text),
                   "%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-                  le32(guid.data()), le16(guid.data() + 4),
-                  le16(guid.data() + 6), guid[8], guid[9], guid[10], guid[11],
+                  read_le32(guid.data()), read_le16(guid.data() + 4),
+                  read_le16(guid.data() + 6), guid[8], guid[9], guid[10], guid[11],
                   guid[12], guid[13], guid[14], guid[15]);
     return text;
 }
@@ -487,7 +464,7 @@ bool ExtractXbeIdentity(const std::vector<uint8_t> &xbe_file,
         identity.valid = true;
         std::copy_n(xbe_file.data() + i + 4, identity.guid.size(),
                     identity.guid.begin());
-        identity.age = le32(xbe_file.data() + i + 20);
+        identity.age = read_le32(xbe_file.data() + i + 20);
         identity.path = std::move(path);
         return true;
     }
@@ -633,21 +610,7 @@ bool ParseAndResolve(const std::vector<uint8_t> &pdb_file,
         labels.push_back(std::move(label));
     }
 
-    std::sort(labels.begin(), labels.end(), [](const auto &a, const auto &b) {
-        if (a.virtual_address != b.virtual_address) {
-            return a.virtual_address < b.virtual_address;
-        }
-        if (a.type != b.type) {
-            return (int)a.type < (int)b.type;
-        }
-        return a.name < b.name;
-    });
-    labels.erase(std::unique(labels.begin(), labels.end(),
-                             [](const auto &a, const auto &b) {
-                                 return a.virtual_address == b.virtual_address &&
-                                        a.type == b.type && a.name == b.name;
-                             }),
-                 labels.end());
+    XemuLabelSymbolUtils::sort_and_dedupe_labels(labels);
 
     status.resolved_labels = labels.size();
     char msg[320];

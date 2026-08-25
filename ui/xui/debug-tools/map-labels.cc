@@ -25,6 +25,8 @@
 namespace XemuMapLabels {
 namespace {
 
+using XemuLabelSymbolUtils::upper_ascii;
+
 constexpr size_t kMaxMapSymbols = 200000;
 
 struct SegmentInfo {
@@ -56,13 +58,6 @@ static std::string trim(std::string value)
         return {};
     }
     return std::string(first, last);
-}
-
-static std::string upper_ascii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return (char)std::toupper(ch); });
-    return value;
 }
 
 static bool parse_hex(const std::string &text, uint32_t &value)
@@ -178,25 +173,6 @@ static void resolve_segments(std::map<uint32_t, SegmentInfo> &segments,
             used.insert(best_index);
         }
     }
-}
-
-static bool compiler_internal_symbol(const std::string &name)
-{
-    return name.empty() || name.front() == '$' ||
-           name.rfind("_$", 0) == 0 ||
-           name.rfind("__safe_se_handler_", 0) == 0;
-}
-
-static std::string display_symbol(const std::string &name)
-{
-    if (compiler_internal_symbol(name)) {
-        return {};
-    }
-    if (name.front() == '?') {
-        const std::string pretty = XemuLabelSymbolUtils::simple_msvc_name(name);
-        return pretty.empty() ? name : pretty;
-    }
-    return XemuLabelSymbolUtils::clean_c_symbol(name);
 }
 
 static bool parse_header_hex(const std::string &line, const char *marker,
@@ -387,7 +363,7 @@ bool ParseAndResolve(const std::string &text,
             ++status.unresolved_symbols;
             continue;
         }
-        const std::string name = display_symbol(symbol.name);
+        const std::string name = XemuLabelSymbolUtils::display_microsoft_symbol(symbol.name);
         if (name.empty()) {
             ++status.skipped_symbols;
             continue;
@@ -413,21 +389,7 @@ bool ParseAndResolve(const std::string &text,
 
     // Remove exact duplicates produced by COMDAT/static entries while keeping
     // aliases at the same address available in the label browser.
-    std::sort(labels.begin(), labels.end(), [](const auto &a, const auto &b) {
-        if (a.virtual_address != b.virtual_address) {
-            return a.virtual_address < b.virtual_address;
-        }
-        if (a.type != b.type) {
-            return (int)a.type < (int)b.type;
-        }
-        return a.name < b.name;
-    });
-    labels.erase(std::unique(labels.begin(), labels.end(),
-                             [](const auto &a, const auto &b) {
-                                 return a.virtual_address == b.virtual_address &&
-                                        a.type == b.type && a.name == b.name;
-                             }),
-                 labels.end());
+    XemuLabelSymbolUtils::sort_and_dedupe_labels(labels);
 
     status.resolved_labels = labels.size();
     char msg[256];

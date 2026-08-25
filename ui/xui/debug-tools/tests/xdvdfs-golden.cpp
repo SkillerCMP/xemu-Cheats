@@ -1,3 +1,4 @@
+// v2.87 current regression ownership.
 #include "xdvdfs-disc.hh"
 
 #include <algorithm>
@@ -103,6 +104,13 @@ int main()
     if (!require(folder.IsDirectory(), "media is directory")) return 1;
     if (!require(folder.children.size() == 1, "media child count")) return 1;
     if (!require(folder.children[0].name == "intro.wmv", "media child name")) return 1;
+
+    const XemuXdvdfs::Entry *nested =
+        XemuXdvdfs::FindEntry(disc, {"MEDIA", "INTRO.WMV"});
+    if (!require(nested != nullptr, "case-insensitive nested path lookup")) return 1;
+    if (!require(nested->size == 0x88, "nested path size")) return 1;
+    if (!require(XemuXdvdfs::FindEntry(disc, {"media", "missing.bin"}) == nullptr,
+                 "missing nested path must not resolve")) return 1;
 
     std::vector<uint8_t> invalid = image;
     invalid[0x10000] = 'X';

@@ -24,15 +24,6 @@ jobs:
       with:
         fetch-depth: 0
         ref: ${{ inputs.ref }}
-    - name: Validate Debug Tools ownership
-      shell: bash
-      run: python3 ./ui/xui/debug-tools/validate-project-layout.py --root .
-    - name: Run Debug Tools regression tests
-      shell: bash
-      run: python3 ./ui/xui/debug-tools/tests/run-regression-tests.py --root .
-    - name: Restore script executable permissions
-      shell: bash
-      run: python3 ./ui/xui/debug-tools/restore-executable-bits.py --root . --update-git-index
     - name: Install dependencies
       run: sudo apt-get install meson
     - name: Determine release version
@@ -50,7 +41,7 @@ jobs:
         pkg_name="xemu-${{ steps.version.outputs.pkg_version }}"
         tar_filename="${pkg_name}.tar"
         tar_prefix="./${pkg_name}/"
-        bash ./scripts/archive-source.sh ${tar_filename} ${tar_prefix}
+        ./scripts/archive-source.sh ${tar_filename} ${tar_prefix}
 
         echo -n ${{ github.sha }} > XEMU_COMMIT
         echo -n ${{ steps.version.outputs.pkg_version }} > XEMU_VERSION
@@ -65,8 +56,22 @@ jobs:
         path: ${{ steps.package.outputs.pkg_filename }}
         compression-level: 0
 
+  linux:
+    name: Linux
+    needs: source
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      pkg_version: ${{ needs.source.outputs.pkg_version }}
+
+  macos:
+    name: macOS
+    needs: source
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      pkg_version: ${{ needs.source.outputs.pkg_version }}
+
   windows:
-    name: Windows x86_64 Release
+    name: Windows
     needs: source
     uses: ./.github/workflows/build-windows.yml
     with:

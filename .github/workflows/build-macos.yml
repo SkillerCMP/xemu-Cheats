@@ -72,7 +72,7 @@ jobs:
         fi
         echo "XEMU_BUILD_OPTIONS=${opts[*]}" >> "$GITHUB_ENV"
     - name: Compile
-      run: bash ./build.sh -a ${{ matrix.arch }} ${XEMU_BUILD_OPTIONS}
+      run: ./build.sh -a ${{ matrix.arch }} ${XEMU_BUILD_OPTIONS}
     - name: Report ccache stats
       run: ccache -s
     - name: Package

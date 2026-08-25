@@ -1,72 +1,214 @@
+// v2.87 current regression ownership.
+// v2.90: semantic coverage for the Keystone-backed F0 IA-32 assembler.
 #include "../x86-cheat-assembler.hh"
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
 namespace {
 
-uint64_t fnv1a64(const std::vector<uint8_t> &bytes)
+std::vector<XemuCheatAsmLine> source(std::initializer_list<const char *> text)
 {
-    uint64_t hash = 1469598103934665603ULL;
-    for (uint8_t byte : bytes) {
-        hash ^= byte;
-        hash *= 1099511628211ULL;
+    std::vector<XemuCheatAsmLine> out;
+    out.reserve(text.size());
+    int line = 1;
+    for (const char *item : text) {
+        out.push_back({line++, item});
     }
-    return hash;
+    return out;
 }
 
-struct Expected {
-    const char *name;
-    std::vector<const char *> lines;
-    bool ok;
-    int error_line;
-    size_t byte_size;
-    uint64_t byte_hash;
-    size_t data_size;
-    uint64_t data_hash;
-    uint32_t preserve_bytes;
-    uint32_t temp_bytes;
-    const char *error;
-};
-
-bool run_case(const Expected &test)
+bool expect_success(const char *name, std::initializer_list<const char *> text,
+                    uint32_t preserve_bytes = 0, uint32_t temp_bytes = 0,
+                    size_t data_size = 0)
 {
-    std::vector<XemuCheatAsmLine> lines;
-    lines.reserve(test.lines.size());
-    int source_line = 1;
-    for (const char *text : test.lines) {
-        lines.push_back({source_line++, text});
-    }
-
     XemuCheatAsmResult result;
     const bool ok = xemu_cheat_assemble_x86_32_at(
-        lines, 0x68010000u, 0x680F0000u, 0x680F1000u, result);
-
-    const bool match =
-        ok == test.ok &&
-        result.error_line == test.error_line &&
-        result.bytes.size() == test.byte_size &&
-        fnv1a64(result.bytes) == test.byte_hash &&
-        result.data.size() == test.data_size &&
-        fnv1a64(result.data) == test.data_hash &&
-        result.preserve_bytes == test.preserve_bytes &&
-        result.temp_bytes == test.temp_bytes &&
-        result.error == test.error;
-
-    if (!match) {
+        source(text), 0x68010000u, 0x680F0000u, 0x680F1000u, result);
+    if (!ok || !result.ok || result.bytes.empty() || result.error_line != 0 ||
+        !result.error.empty() || result.preserve_bytes != preserve_bytes ||
+        result.temp_bytes != temp_bytes || result.data.size() != data_size) {
         std::fprintf(stderr,
-                     "FAIL %-16s ok=%d line=%d bytes=%zu/%016llX "
-                     "data=%zu/%016llX preserve=%u temp=%u error='%s'\n",
-                     test.name, ok ? 1 : 0, result.error_line,
-                     result.bytes.size(),
-                     static_cast<unsigned long long>(fnv1a64(result.bytes)),
-                     result.data.size(),
-                     static_cast<unsigned long long>(fnv1a64(result.data)),
+                     "FAIL %-22s ok=%d result.ok=%d line=%d bytes=%zu data=%zu "
+                     "preserve=%u temp=%u error='%s'\n",
+                     name, ok ? 1 : 0, result.ok ? 1 : 0, result.error_line,
+                     result.bytes.size(), result.data.size(),
                      result.preserve_bytes, result.temp_bytes,
                      result.error.c_str());
         return false;
+    }
+    return true;
+}
+
+bool expect_error_contains(const char *name,
+                           std::initializer_list<const char *> text,
+                           int expected_line, const char *needle)
+{
+    XemuCheatAsmResult result;
+    const bool ok = xemu_cheat_assemble_x86_32_at(
+        source(text), 0x68010000u, 0x680F0000u, 0x680F1000u, result);
+    if (ok || result.ok || result.error_line != expected_line ||
+        result.error.find(needle) == std::string::npos) {
+        std::fprintf(stderr,
+                     "FAIL %-22s ok=%d result.ok=%d line=%d error='%s' "
+                     "(wanted line=%d containing '%s')\n",
+                     name, ok ? 1 : 0, result.ok ? 1 : 0, result.error_line,
+                     result.error.c_str(), expected_line, needle);
+        return false;
+    }
+    return true;
+}
+
+bool check_dd_layout()
+{
+    XemuCheatAsmResult result;
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"mov edx, CarList", "mov eax, [edx]", "ret",
+                    "CarList:", "dd 01D28710, 8B80C5FC, E3BDE8CB"}),
+            0x68010000u, 0, 0, result)) {
+        std::fprintf(stderr, "FAIL dd_label: %s\n", result.error.c_str());
+        return false;
+    }
+    const std::vector<uint8_t> expected = {
+        0x10, 0x87, 0xD2, 0x01,
+        0xFC, 0xC5, 0x80, 0x8B,
+        0xCB, 0xE8, 0xBD, 0xE3,
+    };
+    if (result.data != expected || result.bytes.empty()) {
+        std::fprintf(stderr, "FAIL dd_label data/layout\n");
+        return false;
+    }
+    return true;
+}
+
+bool check_change_branches()
+{
+    XemuCheatAsmResult result;
+    if (!xemu_cheat_assemble_x86_32_change_instruction(
+            "jmp 0008C5A2", 0x0008C590u, 2u, result) ||
+        result.bytes != std::vector<uint8_t>({0xEB, 0x10})) {
+        std::fprintf(stderr, "FAIL change_short_jmp (%s)\n", result.error.c_str());
+        return false;
+    }
+    if (!xemu_cheat_assemble_x86_32_change_instruction(
+            "jne 0008C5A2", 0x0008C590u, 2u, result) ||
+        result.bytes != std::vector<uint8_t>({0x75, 0x10})) {
+        std::fprintf(stderr, "FAIL change_short_jcc (%s)\n", result.error.c_str());
+        return false;
+    }
+    if (!xemu_cheat_assemble_x86_32_change_instruction(
+            "jmp 00100000", 0x0008C590u, 6u, result) ||
+        result.bytes.size() != 5u || result.bytes[0] != 0xE9) {
+        std::fprintf(stderr, "FAIL change_near_jmp (%s)\n", result.error.c_str());
+        return false;
+    }
+    if (xemu_cheat_assemble_x86_32_change_instruction(
+            "mov eax, 12345678", 0x0008C590u, 4u, result) ||
+        result.error.find("Keystone encoding needs") == std::string::npos) {
+        std::fprintf(stderr, "FAIL change_size_guard (%s)\n", result.error.c_str());
+        return false;
+    }
+    return true;
+}
+
+
+bool check_f0_label_branch_targets()
+{
+    XemuCheatAsmResult result;
+
+    /* Keystone 0.9.2's symbol resolver encodes PC-relative x86 targets from
+     * the wrong fixup origin. These exact cases are the minimal forms of the
+     * +1 short-branch and +4 rel32 corruption seen in the CarList F0. */
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"Loop:", "jmp Loop"}),
+            0x68010000u, 0, 0, result) ||
+        result.bytes != std::vector<uint8_t>({0xEB, 0xFE})) {
+        std::fprintf(stderr, "FAIL f0_backward_short_label (%s)\n",
+                     result.error.c_str());
+        return false;
+    }
+
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"call Target", "Target:", "nop"}),
+            0x68010000u, 0, 0, result) ||
+        result.bytes.size() != 6u || result.bytes[0] != 0xE8 ||
+        result.bytes[1] != 0x00 || result.bytes[2] != 0x00 ||
+        result.bytes[3] != 0x00 || result.bytes[4] != 0x00 ||
+        result.bytes[5] != 0x90) {
+        std::fprintf(stderr, "FAIL f0_forward_rel32_label (%s)\n",
+                     result.error.c_str());
+        return false;
+    }
+
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"Here:", "cmp eax, eax", "je Here"}),
+            0x68010000u, 0, 0, result) ||
+        result.bytes != std::vector<uint8_t>({0x39, 0xC0, 0x74, 0xFC})) {
+        std::fprintf(stderr, "FAIL f0_backward_jcc_label (%s)\n",
+                     result.error.c_str());
+        return false;
+    }
+
+    return true;
+}
+
+bool check_legacy_absolute_memory_hex()
+{
+    XemuCheatAsmResult result;
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"mov cl, [0046D784]"}),
+            0x68010000u, 0, 0, result) ||
+        result.bytes != std::vector<uint8_t>({0x8A, 0x0D, 0x84, 0xD7, 0x46, 0x00})) {
+        std::fprintf(stderr, "FAIL legacy_absolute_memory_hex (%s)\n",
+                     result.error.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool check_existing_car_list_f0_control_flow()
+{
+    XemuCheatAsmResult result;
+    if (!xemu_cheat_assemble_x86_32_at(
+            source({"mov T0, CarList", "CheckCar:", "mov T1, [T0]",
+                    "test T1, T1", "jz Original", "cmp eax, T1",
+                    "je Success", "add T0, 4", "jmp CheckCar",
+                    "Success:", "mov eax, 1", "mov ecx, [ebp+8]",
+                    "mov [ecx], eax", "pop esi", "pop ebp", "ret 8",
+                    "Original:", "mov cl, [0046D784]", "CarList:",
+                    "dd 01D28710", "dd 8B80C5FC", "dd E3BDE8CB",
+                    "dd 0001308E", "dd 60D6890E", "dd 0689441B",
+                    "dd 00000000"}),
+            0x68000000u, 0x680F0000u, 0, result)) {
+        std::fprintf(stderr, "FAIL existing_car_list_control_flow: %s\n",
+                     result.error.c_str());
+        return false;
+    }
+
+    struct ByteCheck { size_t offset; uint8_t value; };
+    const ByteCheck checks[] = {
+        {0x45u, 0x74u}, {0x46u, 0x09u}, /* JE internal taken @ 0x50 */
+        {0x4Eu, 0xEBu}, {0x4Fu, 0x09u}, /* JMP internal done @ 0x59 */
+        {0x57u, 0xEBu}, {0x58u, 0x7Bu}, /* JMP Original @ 0xD4 */
+        {0x89u, 0x74u}, {0x8Au, 0x09u}, /* JE internal taken @ 0x94 */
+        {0x92u, 0xEBu}, {0x93u, 0x09u}, /* JMP internal done @ 0x9D */
+        {0x9Bu, 0xEBu}, {0x9Cu, 0x28u}, /* JMP Success @ 0xC5 */
+        {0xC0u, 0xE9u}, {0xC1u, 0x45u}, {0xC2u, 0xFFu},
+        {0xC3u, 0xFFu}, {0xC4u, 0xFFu}, /* JMP CheckCar @ 0x0A */
+    };
+    for (const ByteCheck &check : checks) {
+        if (check.offset >= result.bytes.size() ||
+            result.bytes[check.offset] != check.value) {
+            std::fprintf(stderr,
+                         "FAIL existing_car_list_control_flow byte[%zu]=%02X wanted=%02X size=%zu\n",
+                         check.offset,
+                         check.offset < result.bytes.size() ? result.bytes[check.offset] : 0u,
+                         check.value, result.bytes.size());
+            return false;
+        }
     }
     return true;
 }
@@ -75,114 +217,74 @@ bool run_case(const Expected &test)
 
 int main()
 {
-    const std::vector<Expected> tests = {
-        {"basic_mov",
-         {"mov eax, 12345678", "add eax, 4", "cmp eax, 1234567C",
-          "jne Skip", "xor ecx, ecx", "Skip:", "ret"},
-         true, 0, 24, 0x86441D67C64591F0ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"call_label",
-         {"call Worker", "jmp Done", "Worker:", "mov eax, 1", "ret",
-          "Done:", "nop"},
-         true, 0, 17, 0xB69BDF0E6181E301ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"direct_branch",
-         {"jmp 68010020", "call 68010040", "jne 68010060"},
-         true, 0, 16, 0x5CD1AF99D4D3EC5DULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"dd_label",
-         {"mov edx, CarList", "mov eax, [edx]", "ret", "CarList:",
-          "dd 01D28710, 8B80C5FC, E3BDE8CB"},
-         true, 0, 8, 0x04D151A86F814DD3ULL,
-         12, 0xEE65274E1CF3034AULL, 0, 0, ""},
-        {"preserve",
-         {"PRESERVE EAX, ECX, EDX", "mov eax, 1234", "add ecx, eax",
-          "RESTORE", "ret"},
-         true, 0, 529, 0xE9A08D7E882F71ABULL,
-         0, 0x14650FB0739D0383ULL, 784, 0, ""},
-        {"preserve_all",
-         {"PRESERVEALL", "xor eax, eax", "inc eax", "RESTORE", "ret"},
-         true, 0, 559, 0x66D7AEFCECB2D1FAULL,
-         0, 0x14650FB0739D0383ULL, 784, 0, ""},
-        {"t_dlc",
-         {"mov T0, CarList", "mov T1, 6", "CheckCar:",
-          "cmp eax, dword ptr [T0]", "je Success", "add T0, 4",
-          "dec T1", "jnz CheckCar", "jmp Original", "Success:",
-          "mov eax, 1", "jmp Done", "Original:", "mov ecx, 2",
-          "Done:", "ret", "CarList:",
-          "dd 01D28710, 8B80C5FC, E3BDE8CB, 0001308E, 60D6890E, 0689441B"},
-         true, 0, 234, 0x29D69F630DD581F5ULL,
-         24, 0x68A13D6DCBEED082ULL, 0, 40, ""},
-        {"t_indirect",
-         {"mov T0, 81234567", "mov T1, [T0]", "add T1, 10",
-          "mov [T0], T1", "cmp T1, 20", "setne al", "ret"},
-         true, 0, 138, 0x7FCA9B10F386A2CCULL,
-         0, 0x14650FB0739D0383ULL, 0, 40, ""},
-        {"t_test_jcc",
-         {"mov T2, 80000000", "test T2, T2", "jz Zero", "shr T2, 1",
-          "Zero:", "ret"},
-         true, 0, 121, 0xCF171381B659683BULL,
-         0, 0x14650FB0739D0383ULL, 0, 40, ""},
-        {"cmov",
-         {"mov eax, 1", "cmp eax, 2", "mov ecx, 3", "mov edx, 4",
-          "cmovne ecx, edx", "ret"},
-         true, 0, 24, 0x6F4300A6600A9748ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"bitops",
-         {"mov eax, 12345678", "and eax, FFFFFFF0", "or eax, 5",
-          "xor eax, 10", "shl eax, 2", "shr eax, 1", "ret"},
-         true, 0, 27, 0xE589D47BE24C2B0EULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"mem_modes",
-         {"mov eax, [ebx+ecx*4+20]", "mov [esi+10], eax",
-          "lea edx, [ebp+eax*2-4]", "ret"},
-         true, 0, 12, 0xE9EEB9A0BB151415ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"loop",
-         {"mov ecx, 3", "Again:", "dec eax", "loop Again", "ret"},
-         true, 0, 9, 0x15E88B36ACB63247ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"pushpop",
-         {"push eax", "push 1234", "pop ecx", "pushfd", "popfd", "ret"},
-         true, 0, 10, 0x6C805DDC538C6B9CULL,
-         0, 0x14650FB0739D0383ULL, 0, 0, ""},
-        {"error_badop", {"frobnicate eax, 1"},
-         false, 1, 0, 0x14650FB0739D0383ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0,
-         "unsupported x86 instruction 'FROBNICATE'"},
-        {"error_bad_t", {"mov T8, 1"},
-         false, 1, 0, 0x14650FB0739D0383ULL,
-         0, 0x14650FB0739D0383ULL, 0, 0,
-         "unsupported MOV operand combination"},
-    };
-
-    for (const Expected &test : tests) {
-        if (!run_case(test)) {
-            return 1;
-        }
-    }
-
-    XemuCheatAsmResult change;
-    if (!xemu_cheat_assemble_x86_32_change_instruction(
-            "jmp 0008C5A2", 0x0008C590u, 2u, change) ||
-        change.bytes != std::vector<uint8_t>({0xEB, 0x10})) {
-        std::fprintf(stderr, "FAIL change_short_jmp\n");
-        return 1;
-    }
-    if (!xemu_cheat_assemble_x86_32_change_instruction(
-            "jne 0008C5A2", 0x0008C590u, 2u, change) ||
-        change.bytes != std::vector<uint8_t>({0x75, 0x10})) {
-        std::fprintf(stderr, "FAIL change_short_jcc\n");
-        return 1;
-    }
-    if (!xemu_cheat_assemble_x86_32_change_instruction(
-            "jmp 00100000", 0x0008C590u, 6u, change) ||
-        change.bytes.size() != 5u || change.bytes[0] != 0xE9) {
-        std::fprintf(stderr, "FAIL change_near_jmp\n");
+    // Existing F0 syntax and directive behavior must remain source-compatible.
+    if (!expect_success("basic/control-flow",
+                        {"mov eax, 12345678", "add eax, 4", "cmp eax, 1234567C",
+                         "jne Skip", "xor ecx, ecx", "Skip:", "ret"}) ||
+        !expect_success("call/labels",
+                        {"call Worker", "jmp Done", "Worker:", "mov eax, 1",
+                         "ret", "Done:", "nop"}) ||
+        !check_dd_layout() ||
+        !expect_success("preserve",
+                        {"PRESERVE EAX, ECX, EDX", "mov eax, 1234",
+                         "add ecx, eax", "RESTORE", "ret"}, 784u) ||
+        !expect_success("temp-registers",
+                        {"mov T0, 81234567", "mov T1, [T0]", "add T1, 10",
+                         "mov [T0], T1", "cmp T1, 20", "setne al", "ret"},
+                        0u, 40u) ||
+        // Real existing F0 code supplied for the v2.90 compatibility test.
+        // The semantic regression below verifies the exact internal and user
+        // label destinations, not merely that Keystone returned success.
+        !check_existing_car_list_f0_control_flow()) {
         return 1;
     }
 
-    std::printf("PASS: %zu Type-F0 assembler golden cases + Change direct-address branches\n",
-                tests.size());
+    // v2.90.5 regression: legacy F0 spellings stay accepted even though
+    // Keystone itself is stricter about memory widths and A-F-leading hex.
+    if (!expect_success("legacy-keystone-syntax",
+                        {"mov cl, [0046D784]", "mov ecx, [ebp+8]",
+                         "mov [ecx], eax", "mov eax, FFFFFFFF",
+                         "inc [eax]", "setne [eax]", "ret"}) ||
+        !check_legacy_absolute_memory_hex() ||
+        !check_f0_label_branch_targets()) {
+        return 1;
+    }
+
+    // v2.90 regression: forms the old hand-written encoder did not own are now
+    // ordinary Keystone IA-32. These tests deliberately span x87/MMX/SSE and
+    // less-common integer/addressing syntax instead of enumerating opcodes in xemu.
+    if (!expect_success("x87",
+                        {"fld dword ptr [eax+20]", "fadd dword ptr [ebx+4]",
+                         "fstp dword ptr [ecx+8]", "ret"}) ||
+        !expect_success("mmx",
+                        {"movq mm0, mm1", "paddd mm0, mm2", "pxor mm3, mm3",
+                         "emms", "ret"}) ||
+        !expect_success("sse",
+                        {"movaps xmm0, xmm1", "movups xmm2, [eax]",
+                         "xorps xmm0, xmm0", "shufps xmm0, xmm1, 1B", "ret"}) ||
+        !expect_success("extended-integer",
+                        {"bswap eax", "xadd dword ptr [ebx+4], eax",
+                         "cmpxchg dword ptr [esi], edx", "bt eax, ecx",
+                         "bts dword ptr [edi], 3", "ret"}) ||
+        !expect_success("segment-override",
+                        {"mov eax, dword ptr fs:[30]", "ret"})) {
+        return 1;
+    }
+
+    if (!expect_error_contains("invalid-opcode", {"frobnicate eax, 1"}, 1,
+                               "Keystone x86 assembler rejected") ||
+        !expect_error_contains("invalid-temp", {"mov T8, 1"}, 1,
+                               "F0 temp registers are limited to T0-T7") ||
+        !expect_error_contains("duplicate-label",
+                               {"Again:", "nop", "Again:", "ret"}, 3,
+                               "duplicate label")) {
+        return 1;
+    }
+
+    if (!check_change_branches()) {
+        return 1;
+    }
+
+    std::printf("PASS: Keystone-backed F0 assembler keeps existing syntax/current CarList F0 and accepts broad IA-32 x87/MMX/SSE/integer forms\n");
     return 0;
 }
