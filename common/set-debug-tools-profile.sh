@@ -14,10 +14,10 @@ if [[ -z "$PROFILE" ]]; then
 fi
 
 case "$PROFILE" in
-  main|main+hdd|main+memory|full) ;;
+  main|main+hdd|main+memory|full|folder-hdd) ;;
   *)
     echo "Invalid Debug Tools profile: $PROFILE" >&2
-    echo "Expected one of: main, main+hdd, main+memory, full" >&2
+    echo "Expected one of: main, main+hdd, main+memory, full, folder-hdd" >&2
     exit 2
     ;;
 esac

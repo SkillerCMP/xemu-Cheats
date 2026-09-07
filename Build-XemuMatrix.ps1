@@ -42,7 +42,7 @@ $script:BuildResults = New-Object System.Collections.ArrayList
 $script:DockerReady = $true
 $script:DockerExe = 'docker'
 $script:DebugToolsOverlayName = 'CMP-Official-Debug-Tools.zip'
-$script:ValidDebugToolsProfiles = @('main','main+hdd','main+memory','full')
+$script:ValidDebugToolsProfiles = @('main','main+hdd','main+memory','full','folder-hdd')
 
 function Add-BuildResult(
     [string]$Platform,
@@ -194,7 +194,7 @@ function Invoke-ExternalLogged(
     if ($exitCode -ne 0) {
         $tail = @()
         try {
-            $tail = @(Get-Content -LiteralPath $LogPath -Tail 30 -ErrorAction Stop)
+            $tail = @(Get-Content -LiteralPath $LogPath -Tail 120 -ErrorAction Stop)
         } catch {
             $tail = @()
         }
@@ -568,7 +568,8 @@ function Resolve-DebugToolsProfile(
         Write-Host '[1] main        - Current Game + Cheat Engine only'
         Write-Host '[2] main+hdd    - Main + HDD Directory / Kernel RPC'
         Write-Host '[3] main+memory - Main + Memory Viewer / Search / x86 Debugger'
-        Write-Host '[4] full        - All Debug Tools additions'
+        Write-Host '[4] full        - XEMU + All Addons and Debug Tools'
+        Write-Host '[5] folder-hdd  - XEMU + Folder-HDD / Video Recorder (no Debug Tools)'
         Write-Host ''
 
         while ($true) {
@@ -580,8 +581,9 @@ function Resolve-DebugToolsProfile(
                 '1' { return 'main' }
                 '2' { return 'main+hdd' }
                 '3' { return 'main+memory' }
+                '5' { return 'folder-hdd' }
             }
-            Write-Warning 'Please enter a number from 1 to 4.'
+            Write-Warning 'Please enter a number from 1 to 5.'
         }
     }
 

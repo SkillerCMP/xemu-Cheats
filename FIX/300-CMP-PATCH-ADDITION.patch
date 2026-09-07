@@ -1,1580 +1,5 @@
-diff --git a/Build-Xemu-DOCKER.bat b/Build-Xemu-DOCKER.bat
-new file mode 100644
-index 0000000..88a4b0d
---- /dev/null
-+++ b/Build-Xemu-DOCKER.bat
-@@ -0,0 +1,236 @@
-+@echo off
-+setlocal EnableExtensions EnableDelayedExpansion
-+
-+rem ============================================================================
-+rem  Xemu GitHub-Equivalent Windows Release Builder v1.06
-+rem  Mirrors .github/workflows/build.yml + build-windows.yml (x86_64/release)
-+rem  Uses the same pinned GHCR GCC/MXE toolchain and cv2pdb 0.52 post-process.
-+rem ============================================================================
-+
-+set "TOOLCHAIN_IMAGE=ghcr.io/xemu-project/xemu-win64-toolchain-gcc:sha-2881edd"
-+set "CV2PDB_URL=https://github.com/rainers/cv2pdb/releases/download/v0.52/cv2pdb-0.52.zip"
-+set "SCRIPT_DIR=%~dp0"
-+if not "%~1"=="" (
-+  set "SOURCE_ROOT=%~f1"
-+) else (
-+  set "SOURCE_ROOT=%SCRIPT_DIR%"
-+)
-+pushd "%SOURCE_ROOT%" >nul 2>&1 || goto :source_failed
-+set "SOURCE_ROOT=%CD%"
-+popd
-+if not exist "%SOURCE_ROOT%\build.sh" goto :source_failed
-+if not exist "%SOURCE_ROOT%\.github\workflows\build-windows.yml" goto :source_failed
-+
-+call :select_debug_tools_profile "%~2"
-+if errorlevel 1 goto :fail_early
-+
-+where docker >nul 2>&1 || goto :docker_missing
-+docker info >nul 2>&1 || goto :docker_not_running
-+
-+for %%I in ("%SOURCE_ROOT%\..") do set "SOURCE_PARENT=%%~fI"
-+set "RUN_ID=%RANDOM%%RANDOM%%RANDOM%"
-+set "OUTPUT_BASE=%SOURCE_PARENT%\Xemu-GitHub-Windows-Output"
-+set "RUN_ROOT=%OUTPUT_BASE%\RUN-%RUN_ID%"
-+set "DIST_ROOT=%RUN_ROOT%\dist"
-+set "LOG_ROOT=%RUN_ROOT%\logs"
-+
-+if exist "%RUN_ROOT%" rmdir /s /q "%RUN_ROOT%"
-+mkdir "%RUN_ROOT%" >nul 2>&1
-+mkdir "%LOG_ROOT%" >nul 2>&1
-+>"%RUN_ROOT%\DEBUG_TOOLS_PROFILE.txt" echo %DEBUG_TOOLS_PROFILE%
-+
-+echo.
-+echo ============================================================================
-+echo  Xemu GitHub-Equivalent Windows Release Build v1.06
-+echo ============================================================================
-+echo  Source    : %SOURCE_ROOT%
-+echo  Output    : %RUN_ROOT%
-+echo  Toolchain : %TOOLCHAIN_IMAGE%
-+echo  Build     : x86_64 release, static, LTO, x86_version=3
-+echo  DebugTools: %DEBUG_TOOLS_PROFILE%
-+echo  Symbols   : cv2pdb 0.52, matching GitHub post-processing
-+echo  Dependencies: Debug Tools owns Capstone + Keystone bootstrap
-+echo ============================================================================
-+echo.
-+
-+echo [1/7] Pulling the pinned GitHub Windows toolchain...
-+docker pull "%TOOLCHAIN_IMAGE%"
-+if errorlevel 1 goto :failed
-+
-+echo [2/7] Using Debug Tools-owned Docker build driver...
-+if not exist "%SOURCE_ROOT%\ui\xui\debug-tools\docker-build-windows.sh" goto :source_failed
-+
-+echo [3/7] Running GitHub-equivalent source validation and Windows cross build...
-+docker run --rm --platform linux/amd64 ^
-+  --env "XEMU_DEBUG_TOOLS_PROFILE=%DEBUG_TOOLS_PROFILE%" ^
-+  --mount "type=bind,source=%SOURCE_ROOT%,target=/input,readonly" ^
-+  --mount "type=bind,source=%RUN_ROOT%,target=/output" ^
-+  "%TOOLCHAIN_IMAGE%" bash /input/ui/xui/debug-tools/docker-build-windows.sh
-+if errorlevel 1 goto :failed
-+if not exist "%DIST_ROOT%\xemu.exe" goto :failed
-+
-+set "PKG_VERSION=unknown"
-+if exist "%RUN_ROOT%\PACKAGE_VERSION.txt" set /p PKG_VERSION=<"%RUN_ROOT%\PACKAGE_VERSION.txt"
-+
-+echo [4/7] Preparing cv2pdb 0.52 exactly like GitHub...
-+rem GitHub downloads cv2pdb fresh into the Windows job and extracts it to a
-+rem known directory. Do the same here. Do not use recursive cache discovery:
-+rem an invalid/stale cached path can make CMD fail before cv2pdb even starts.
-+set "CV2PDB_ZIP=%RUN_ROOT%\cv2pdb.zip"
-+set "CV2PDB_ROOT=%RUN_ROOT%\cv2pdb"
-+set "CV2PDB_EXE=%CV2PDB_ROOT%\cv2pdb64.exe"
-+if exist "%CV2PDB_ROOT%" rmdir /s /q "%CV2PDB_ROOT%"
-+if exist "%CV2PDB_ZIP%" del /q "%CV2PDB_ZIP%"
-+
-+powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -UseBasicParsing -Uri '%CV2PDB_URL%' -OutFile '%CV2PDB_ZIP%'"
-+if errorlevel 1 goto :failed
-+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%CV2PDB_ZIP%' -DestinationPath '%CV2PDB_ROOT%' -Force"
-+if errorlevel 1 goto :failed
-+
-+dir /s /b "%CV2PDB_ROOT%" > "%LOG_ROOT%\cv2pdb-extract.txt" 2>&1
-+if not exist "%CV2PDB_EXE%" (
-+  echo [ERROR] Expected GitHub cv2pdb executable was not found:
-+  echo         %CV2PDB_EXE%
-+  echo [ERROR] Extracted-file listing: %LOG_ROOT%\cv2pdb-extract.txt
-+  goto :failed
-+)
-+
-+rem Record the converter itself so a local run can be audited against GitHub.
-+certutil -hashfile "%CV2PDB_EXE%" SHA256 > "%LOG_ROOT%\cv2pdb64.sha256.txt"
-+
-+echo [5/7] Generating PDB and stripping xemu.exe exactly like GitHub...
-+pushd "%DIST_ROOT%" >nul || goto :failed
-+"%CV2PDB_EXE%" xemu.exe > "%LOG_ROOT%\cv2pdb.txt" 2>&1
-+set "CV2PDB_RC=!ERRORLEVEL!"
-+popd
-+if not "!CV2PDB_RC!"=="0" goto :failed
-+if not exist "%DIST_ROOT%\xemu.pdb" goto :failed
-+
-+for %%F in ("%DIST_ROOT%\xemu.exe") do set "EXE_SIZE=%%~zF"
-+for %%F in ("%DIST_ROOT%\xemu.pdb") do set "PDB_SIZE=%%~zF"
-+certutil -hashfile "%DIST_ROOT%\xemu.exe" SHA256 > "%LOG_ROOT%\xemu-post-cv2pdb.sha256.txt"
-+certutil -hashfile "%DIST_ROOT%\xemu.pdb" SHA256 > "%LOG_ROOT%\xemu-pdb.sha256.txt"
-+
-+echo [6/7] Packaging release and symbols archives...
-+set "SEVENZIP="
-+for %%I in (7z.exe) do set "SEVENZIP=%%~$PATH:I"
-+if not defined SEVENZIP if exist "%ProgramFiles%\7-Zip\7z.exe" set "SEVENZIP=%ProgramFiles%\7-Zip\7z.exe"
-+if not defined SEVENZIP if exist "C:\Program Files (x86)\7-Zip\7z.exe" set "SEVENZIP=C:\Program Files (x86)\7-Zip\7z.exe"
-+set "PACKAGE_ROOT=%RUN_ROOT%\dist-pdb"
-+mkdir "%PACKAGE_ROOT%" >nul 2>&1
-+rem 7-Zip uses ! in its include/exclude wildcard switches. The BAT normally
-+rem runs with delayed expansion enabled, which would consume those ! characters
-+rem and turn -xr!*.pdb / -ir!*.pdb into invalid 7-Zip switches.
-+setlocal DisableDelayedExpansion
-+if defined SEVENZIP (
-+  pushd "%DIST_ROOT%" >nul
-+  "%SEVENZIP%" a -tzip "%PACKAGE_ROOT%\xemu-%PKG_VERSION%-windows-x86_64.zip" * "-xr!*.pdb" > "%LOG_ROOT%\package-release.txt" 2>&1
-+  if errorlevel 1 (popd & endlocal & goto :failed)
-+  "%SEVENZIP%" a -tzip "%PACKAGE_ROOT%\xemu-%PKG_VERSION%-windows-x86_64-pdb.zip" "-ir!*.pdb" > "%LOG_ROOT%\package-pdb.txt" 2>&1
-+  if errorlevel 1 (popd & endlocal & goto :failed)
-+  popd
-+) else (
-+  echo [WARN] 7-Zip was not found. GitHub-style ZIP packaging was skipped.
-+  echo [WARN] xemu.exe and xemu.pdb are still complete in: %DIST_ROOT%
-+)
-+endlocal
-+
-+echo [7/7] Final verification...
-+if not exist "%DIST_ROOT%\xemu.exe" goto :failed
-+if not exist "%DIST_ROOT%\xemu.pdb" goto :failed
-+
-+echo.
-+echo ============================================================================
-+echo  GITHUB-EQUIVALENT WINDOWS BUILD COMPLETE
-+echo ============================================================================
-+echo  Version : %PKG_VERSION%
-+echo  Profile : %DEBUG_TOOLS_PROFILE%
-+echo  EXE     : %DIST_ROOT%\xemu.exe
-+echo  EXE size: !EXE_SIZE! bytes
-+echo  PDB     : %DIST_ROOT%\xemu.pdb
-+echo  PDB size: !PDB_SIZE! bytes
-+echo  Logs    : %LOG_ROOT%
-+echo  Source  : %RUN_ROOT%\source
-+if defined SEVENZIP echo  Packages: %PACKAGE_ROOT%
-+echo ============================================================================
-+echo.
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 0
-+
-+:select_debug_tools_profile
-+set "PROFILE_INPUT=%~1"
-+if not defined PROFILE_INPUT if defined XEMU_DEBUG_TOOLS_PROFILE set "PROFILE_INPUT=%XEMU_DEBUG_TOOLS_PROFILE%"
-+if defined PROFILE_INPUT goto :normalize_debug_tools_profile
-+
-+echo.
-+echo Select Debug Tools build profile:
-+echo   [1] main        - Current Game + Cheat Engine only
-+echo   [2] main+hdd    - Main + HDD Directory / Kernel RPC
-+echo   [3] main+memory - Main + Memory Viewer / Search / x86 Debugger
-+echo   [4] full        - All Debug Tools additions
-+echo.
-+choice /c 1234 /n /m "Select profile [1-4]: "
-+if errorlevel 4 (
-+  set "PROFILE_INPUT=full"
-+  goto :debug_tools_profile_selected
-+)
-+if errorlevel 3 (
-+  set "PROFILE_INPUT=main+memory"
-+  goto :debug_tools_profile_selected
-+)
-+if errorlevel 2 (
-+  set "PROFILE_INPUT=main+hdd"
-+  goto :debug_tools_profile_selected
-+)
-+if errorlevel 1 (
-+  set "PROFILE_INPUT=main"
-+  goto :debug_tools_profile_selected
-+)
-+echo [ERROR] No Debug Tools profile was selected.
-+exit /b 1
-+
-+:normalize_debug_tools_profile
-+if /i "%PROFILE_INPUT%"=="1" set "PROFILE_INPUT=main"
-+if /i "%PROFILE_INPUT%"=="2" set "PROFILE_INPUT=main+hdd"
-+if /i "%PROFILE_INPUT%"=="3" set "PROFILE_INPUT=main+memory"
-+if /i "%PROFILE_INPUT%"=="4" set "PROFILE_INPUT=full"
-+if /i "%PROFILE_INPUT%"=="main" goto :debug_tools_profile_selected
-+if /i "%PROFILE_INPUT%"=="main+hdd" goto :debug_tools_profile_selected
-+if /i "%PROFILE_INPUT%"=="main+memory" goto :debug_tools_profile_selected
-+if /i "%PROFILE_INPUT%"=="full" goto :debug_tools_profile_selected
-+echo [ERROR] Invalid Debug Tools profile: %PROFILE_INPUT%
-+echo [ERROR] Expected main, main+hdd, main+memory, or full.
-+exit /b 1
-+
-+:debug_tools_profile_selected
-+set "DEBUG_TOOLS_PROFILE=%PROFILE_INPUT%"
-+exit /b 0
-+
-+:docker_missing
-+echo [ERROR] Docker was not found in PATH.
-+echo Install/start Docker Desktop, then rerun this BAT.
-+goto :fail_early
-+
-+:docker_not_running
-+echo [ERROR] Docker is installed but the Docker engine is not running.
-+echo Start Docker Desktop, then rerun this BAT.
-+goto :fail_early
-+
-+:source_failed
-+echo [ERROR] xemu source root was not found.
-+echo Place this BAT in the xemu source root or pass the source folder as argument 1.
-+goto :fail_early
-+
-+:failed
-+echo.
-+echo ============================================================================
-+echo  BUILD FAILED
-+echo ============================================================================
-+echo  Output/logs retained at: %RUN_ROOT%
-+echo ============================================================================
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 1
-+
-+:fail_early
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 1
-diff --git a/Build-Xemu-MINGW64.bat b/Build-Xemu-MINGW64.bat
-new file mode 100644
-index 0000000..918cba8
---- /dev/null
-+++ b/Build-Xemu-MINGW64.bat
-@@ -0,0 +1,239 @@
-+@echo off
-+setlocal EnableExtensions EnableDelayedExpansion
-+
-+rem ============================================================================
-+rem  Xemu Native MSYS2 / MINGW64 Clean Builder v1.08
-+rem  Uses existing MSYS2/MINGW64. Installs NOTHING.
-+rem  Builds from a disposable copy and preserves fresh failure logs.
-+rem ============================================================================
-+
-+set "SCRIPT_DIR=%~dp0"
-+if not defined MSYS2_ROOT set "MSYS2_ROOT=C:\msys64"
-+if not defined XEMU_JOBS set "XEMU_JOBS=12"
-+if not defined XEMU_KEEP_TEMP set "XEMU_KEEP_TEMP=0"
-+
-+if not "%~1"=="" (
-+    set "SOURCE_ROOT=%~f1"
-+) else (
-+    set "SOURCE_ROOT=%SCRIPT_DIR%"
-+    if not exist "%SCRIPT_DIR%build.sh" (
-+        if exist "%SCRIPT_DIR%Xemu\build.sh" set "SOURCE_ROOT=%SCRIPT_DIR%Xemu"
-+    )
-+)
-+pushd "%SOURCE_ROOT%" >nul 2>&1
-+if errorlevel 1 goto :source_failed
-+set "SOURCE_ROOT=%CD%"
-+popd
-+if not exist "%SOURCE_ROOT%\build.sh" goto :source_failed
-+
-+if exist "%MSYS2_ROOT%\msys2_shell.cmd" goto :msys2_found
-+for %%D in (C D E F G) do (
-+    if exist "%%D:\msys64\msys2_shell.cmd" (
-+        set "MSYS2_ROOT=%%D:\msys64"
-+        goto :msys2_found
-+    )
-+)
-+echo [ERROR] MSYS2 not found.
-+goto :fail_early
-+
-+:msys2_found
-+for %%I in ("%SOURCE_ROOT%\..") do set "SOURCE_PARENT=%%~fI"
-+set "OUTPUT_ROOT=%SOURCE_PARENT%\Xemu-MINGW64-Output"
-+set "RUN_ID=%RANDOM%%RANDOM%%RANDOM%"
-+set "WORK_ROOT=%TEMP%\Xemu-MINGW64-Build-%RUN_ID%"
-+set "WORK_SOURCE=%WORK_ROOT%\Xemu"
-+set "COPY_LOG=%TEMP%\Xemu-MINGW64-Copy-%RUN_ID%.log"
-+set "MSYS_SCRIPT_WIN=%MSYS2_ROOT%\tmp\xemu-native-build-%RUN_ID%.sh"
-+set "MSYS_SCRIPT_B64=%TEMP%\xemu-native-build-%RUN_ID%.b64"
-+set "MSYS_SCRIPT_UNIX=/tmp/xemu-native-build-%RUN_ID%.sh"
-+set "FAIL_ROOT=%OUTPUT_ROOT%\FAILED-%RUN_ID%"
-+
-+echo.
-+echo ============================================================================
-+echo  Xemu Native MINGW64 Clean Build v1.08
-+echo ============================================================================
-+echo  Run ID : %RUN_ID%
-+echo  Source : %SOURCE_ROOT%
-+echo  MSYS2  : %MSYS2_ROOT%
-+echo  Jobs   : %XEMU_JOBS%
-+echo  Temp   : %WORK_SOURCE%
-+echo  Output : %OUTPUT_ROOT%
-+echo ============================================================================
-+echo.
-+
-+if exist "%WORK_ROOT%" rmdir /s /q "%WORK_ROOT%"
-+mkdir "%WORK_SOURCE%" >nul 2>&1
-+echo [1/6] Copying source to temporary build tree...
-+robocopy "%SOURCE_ROOT%" "%WORK_SOURCE%" /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /XJ /XD ".git" "build" "dist" "__pycache__" /XF "build.log" "*.pyc" "*.pyo" > "%COPY_LOG%"
-+set "COPY_RC=!ERRORLEVEL!"
-+if !COPY_RC! GEQ 8 goto :build_failed
-+
-+where certutil >nul 2>&1
-+if errorlevel 1 goto :build_failed
-+>"%MSYS_SCRIPT_B64%" (
-+    echo IyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLWV1byBwaXBlZmFpbAoKZXhwb3J0IFRBUl9PUFRJT05T
-+    echo PSItLWZvcmNlLWxvY2FsJHtUQVJfT1BUSU9OUzorICRUQVJfT1BUSU9OU30iCgpTT1VSQ0U9IiQo
-+    echo Y3lncGF0aCAtdSAiJHtYRU1VX1RFTVBfU09VUkNFX1dJTjo/WEVNVV9URU1QX1NPVVJDRV9XSU4g
-+    echo aXMgbm90IHNldH0iKSIKSk9CUz0iJHtYRU1VX0pPQlM6LTEyfSIKY2QgIiRTT1VSQ0UiCgpMT0df
-+    echo RElSPSIkU09VUkNFLy54ZW11LW5hdGl2ZS1idWlsZC1sb2dzIgpta2RpciAtcCAiJExPR19ESVIi
-+    echo CgplY2hvICJbMi82XSBWYWxpZGF0aW5nIE1TWVMyL01JTkdXNjQgZW52aXJvbm1lbnQuLi4iCmlm
-+    echo IFtbICIke01TWVNURU06LX0iICE9ICJNSU5HVzY0IiBdXTsgdGhlbgogICAgcHJpbnRmICJFUlJP
-+    echo UjogRXhwZWN0ZWQgTVNZU1RFTT1NSU5HVzY0LCBnb3QgPCVxPlxuIiAiJHtNU1lTVEVNOi19Igog
-+    echo ICAgZXhpdCAyMApmaQoKR0NDX1BBVEg9IiQoY29tbWFuZCAtdiBnY2MgfHwgdHJ1ZSkiCmNhc2Ug
-+    echo IiRHQ0NfUEFUSCIgaW4KICAgIC9taW5ndzY0L2Jpbi9nY2MqKSA7OwogICAgKikKICAgICAgICBl
-+    echo Y2hvICJFUlJPUjogTUlOR1c2NCBpcyBhY3RpdmUsIGJ1dCBnY2MgZGlkIG5vdCByZXNvbHZlIGZy
-+    echo b20gL21pbmd3NjQvYmluOiAkR0NDX1BBVEgiCiAgICAgICAgZXhpdCAyMAogICAgICAgIDs7CmVz
-+    echo YWMKCnsKICAgIGVjaG8gIk1TWVNURU09JHtNU1lTVEVNOi19IgogICAgZWNobyAiTUlOR1dfUFJF
-+    echo RklYPSR7TUlOR1dfUFJFRklYOi19IgogICAgZWNobyAiU09VUkNFPSRTT1VSQ0UiCiAgICBlY2hv
-+    echo ICJKT0JTPSRKT0JTIgogICAgZWNobyAiZ2NjPSQoJEdDQ19QQVRIIC1kdW1wZnVsbHZlcnNpb24g
-+    echo LWR1bXB2ZXJzaW9uKSIKICAgIGVjaG8gImcrKz0kKGcrKyAtZHVtcGZ1bGx2ZXJzaW9uIC1kdW1w
-+    echo dmVyc2lvbikiCiAgICBlY2hvICJweXRob249JChweXRob24zIC0tdmVyc2lvbiAyPiYxKSIKICAg
-+    echo IGVjaG8gIlRBUl9PUFRJT05TPSR7VEFSX09QVElPTlM6LX0iCn0gPiAiJExPR19ESVIvZW52aXJv
-+    echo bm1lbnQudHh0IgpjYXQgIiRMT0dfRElSL2Vudmlyb25tZW50LnR4dCIKCm1pc3NpbmdfdG9vbHM9
-+    echo MAo6ID4gIiRMT0dfRElSL2RlcGVuZGVuY3ktY2hlY2sudHh0Igpmb3IgdG9vbCBpbiBnY2MgZysr
-+    echo IHB5dGhvbjMgcGtnLWNvbmZpZyBuaW5qYSBjbWFrZSBtYWtlIGN1cmwgdGFyOyBkbwogICAgaWYg
-+    echo dG9vbF9wYXRoPSIkKGNvbW1hbmQgLXYgIiR0b29sIiAyPi9kZXYvbnVsbCkiOyB0aGVuCiAgICAg
-+    echo ICAgZWNobyAiRk9VTkQgVE9PTDogJHRvb2wgLT4gJHRvb2xfcGF0aCIgfCB0ZWUgLWEgIiRMT0df
-+    echo RElSL2RlcGVuZGVuY3ktY2hlY2sudHh0IgogICAgZWxzZQogICAgICAgIGVjaG8gIk1JU1NJTkcg
-+    echo VE9PTDogJHRvb2wiIHwgdGVlIC1hICIkTE9HX0RJUi9kZXBlbmRlbmN5LWNoZWNrLnR4dCIKICAg
-+    echo ICAgICBtaXNzaW5nX3Rvb2xzPTEKICAgIGZpCmRvbmUKaWYgW1sgIiRtaXNzaW5nX3Rvb2xzIiAt
-+    echo bmUgMCBdXTsgdGhlbgogICAgZWNobyAiRVJST1I6IE9uZSBvciBtb3JlIHJlcXVpcmVkIGJ1aWxk
-+    echo IHRvb2xzIGFyZSBtaXNzaW5nLiIKICAgIGV4aXQgMjEKZmkKCmVjaG8gIi0tLSBwa2ctY29uZmln
-+    echo IHZlcnNpb25zIC0tLSIgfCB0ZWUgLWEgIiRMT0dfRElSL2RlcGVuZGVuY3ktY2hlY2sudHh0Igpm
-+    echo b3IgZGVwIGluIGNhcHN0b25lIGdsaWItMi4wIGVwb3h5IHNkbDIgcGl4bWFuLTEgbGlidXNiLTEu
-+    echo MCBzYW1wbGVyYXRlIHNsaXJwIGxpYmN1cmwgb3BlbnNzbDsgZG8KICAgIGlmIHBrZy1jb25maWcg
-+    echo LS1leGlzdHMgIiRkZXAiOyB0aGVuCiAgICAgICAgZWNobyAiJGRlcD0kKHBrZy1jb25maWcgLS1t
-+    echo b2R2ZXJzaW9uICIkZGVwIikiIHwgdGVlIC1hICIkTE9HX0RJUi9kZXBlbmRlbmN5LWNoZWNrLnR4
-+    echo dCIKICAgIGVsc2UKICAgICAgICBlY2hvICIkZGVwPW5vdC1mb3VuZC1vci1ub3QtcmVxdWlyZWQi
-+    echo IHwgdGVlIC1hICIkTE9HX0RJUi9kZXBlbmRlbmN5LWNoZWNrLnR4dCIKICAgIGZpCmRvbmUKCmVj
-+    echo aG8gIlsyYi82XSBWZXJpZnlpbmcgR05VIHRhciBkcml2ZS1sZXR0ZXIgaGFuZGxpbmcuLi4iClRB
-+    echo Ul9URVNUX0RJUj0iJExPR19ESVIvdGFyLXByZWZsaWdodCIKcm0gLXJmICIkVEFSX1RFU1RfRElS
-+    echo Igpta2RpciAtcCAiJFRBUl9URVNUX0RJUi9zcmMiICIkVEFSX1RFU1RfRElSL291dCIKcHJpbnRm
-+    echo ICJ4ZW11LXRhci1wcmVmbGlnaHRcbiIgPiAiJFRBUl9URVNUX0RJUi9zcmMvcGF5bG9hZC50eHQi
-+    echo Ci91c3IvYmluL3RhciBjemYgIiRUQVJfVEVTVF9ESVIvdGVzdC50YXIuZ3oiIC1DICIkVEFSX1RF
-+    echo U1RfRElSL3NyYyIgcGF5bG9hZC50eHQKVEFSX1RFU1RfQVJDSElWRT0iJChjeWdwYXRoIC1tICIk
-+    echo VEFSX1RFU1RfRElSL3Rlc3QudGFyLmd6IikiClRBUl9URVNUX09VVFBVVD0iJChjeWdwYXRoIC1t
-+    echo ICIkVEFSX1RFU1RfRElSL291dCIpIgppZiAhIC91c3IvYmluL3RhciB4emYgIiRUQVJfVEVTVF9B
-+    echo UkNISVZFIiAtQyAiJFRBUl9URVNUX09VVFBVVCIgPiIkTE9HX0RJUi90YXItcHJlZmxpZ2h0LnR4
-+    echo dCIgMj4mMTsgdGhlbgogICAgZWNobyAiRVJST1I6IEdOVSB0YXIgc3RpbGwgY2Fubm90IGV4dHJh
-+    echo Y3QgYSBuYXRpdmUgZHJpdmUtbGV0dGVyIHBhdGguIgogICAgY2F0ICIkTE9HX0RJUi90YXItcHJl
-+    echo ZmxpZ2h0LnR4dCIKICAgIGV4aXQgMjMKZmkKaWYgW1sgISAtZiAiJFRBUl9URVNUX0RJUi9vdXQv
-+    echo cGF5bG9hZC50eHQiIF1dOyB0aGVuCiAgICBlY2hvICJFUlJPUjogR05VIHRhciBwcmVmbGlnaHQg
-+    echo ZGlkIG5vdCBwcm9kdWNlIHRoZSBleHBlY3RlZCBmaWxlLiIKICAgIGV4aXQgMjMKZmkKZWNobyAi
-+    echo R05VIHRhciBkcml2ZS1sZXR0ZXIgcHJlZmxpZ2h0OiBQQVNTIiB8IHRlZSAiJExPR19ESVIvdGFy
-+    echo LXByZWZsaWdodC50eHQiCnJtIC1yZiAiJFRBUl9URVNUX0RJUiIKCmVjaG8gIlsyYy82XSBWZXJp
-+    echo ZnlpbmcgV2luZG93cyBzeW1ib2xpYy1saW5rIHByaXZpbGVnZS4uLiIKU1lNTElOS19URVNUX0RJ
-+    echo Uj0iJExPR19ESVIvc3ltbGluay1wcmVmbGlnaHQiCnJtIC1yZiAiJFNZTUxJTktfVEVTVF9ESVIi
-+    echo Cm1rZGlyIC1wICIkU1lNTElOS19URVNUX0RJUiIKcHJpbnRmICJ4ZW11LXN5bWxpbmstcHJlZmxp
-+    echo Z2h0XG4iID4gIiRTWU1MSU5LX1RFU1RfRElSL3NvdXJjZS50eHQiCnNldCArZQpweXRob24zIC0g
-+    echo IiRTWU1MSU5LX1RFU1RfRElSIiA+IiRMT0dfRElSL3N5bWxpbmstcHJlZmxpZ2h0LnR4dCIgMj4m
-+    echo MSA8PCdQWScKaW1wb3J0IG9zCmltcG9ydCBzeXMKZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpy
-+    echo b290ID0gUGF0aChzeXMuYXJndlsxXSkKc3JjID0gcm9vdCAvICJzb3VyY2UudHh0Igpkc3QgPSBy
-+    echo b290IC8gImxpbmsudHh0IgoKdHJ5OgogICAgb3Muc3ltbGluayhzcmMsIGRzdCkKZXhjZXB0IE9T
-+    echo RXJyb3IgYXMgZXhjOgogICAgcHJpbnQoZiJFUlJPUjogUHl0aG9uIG9zLnN5bWxpbmsoKSBmYWls
-+    echo ZWQ6IHtleGN9IikKICAgIHN5cy5leGl0KDEpCgppZiBub3QgZHN0LmlzX3N5bWxpbmsoKToKICAg
-+    echo IHByaW50KCJFUlJPUjogb3Muc3ltbGluaygpIHJldHVybmVkIHdpdGhvdXQgY3JlYXRpbmcgYSBz
-+    echo eW1ib2xpYyBsaW5rLiIpCiAgICBzeXMuZXhpdCgxKQoKcHJpbnQoIldpbmRvd3MvUHl0aG9uIHN5
-+    echo bWJvbGljLWxpbmsgcHJlZmxpZ2h0OiBQQVNTIikKUFkKc3ltbGlua19yYz0kPwpzZXQgLWUKaWYg
-+    echo W1sgIiRzeW1saW5rX3JjIiAtbmUgMCBdXTsgdGhlbgogICAgY2F0ICIkTE9HX0RJUi9zeW1saW5r
-+    echo LXByZWZsaWdodC50eHQiCiAgICBlY2hvCiAgICBlY2hvICJFUlJPUjogV2luZG93cyBzeW1ib2xp
-+    echo Yy1saW5rIGNyZWF0aW9uIGlzIG5vdCBwZXJtaXR0ZWQgZm9yIHRoaXMgcHJvY2Vzcy4iCiAgICBl
-+    echo Y2hvICJFbmFibGUgV2luZG93cyBEZXZlbG9wZXIgTW9kZSwgdGhlbiByZXJ1biB0aGlzIEJBVC4i
-+    echo CiAgICBlY2hvICJBbHRlcm5hdGl2ZTogcnVuIHRoZSBCQVQgYXMgQWRtaW5pc3RyYXRvci4iCiAg
-+    echo ICBlY2hvICJUaGlzIGlzIHJlcXVpcmVkIGJ5IHhlbXUncyBzY3JpcHRzL3N5bWxpbmstaW5zdGFs
-+    echo bC10cmVlLnB5LiIKICAgIGV4aXQgMjQKZmkKY2F0ICIkTE9HX0RJUi9zeW1saW5rLXByZWZsaWdo
-+    echo dC50eHQiCnJtIC1yZiAiJFNZTUxJTktfVEVTVF9ESVIiCgplY2hvICJbMy82XSBSdW5uaW5nIERl
-+    echo YnVnIFRvb2xzIHByb2plY3QtbGF5b3V0IHZhbGlkYXRpb24uLi4iCnNldCArZQpweXRob24zIC4v
-+    echo dWkveHVpL2RlYnVnLXRvb2xzL3ZhbGlkYXRlLXByb2plY3QtbGF5b3V0LnB5IC0tcm9vdCAuIDI+
-+    echo JjEgfCB0ZWUgIiRMT0dfRElSL2xheW91dC12YWxpZGF0aW9uLnR4dCIKbGF5b3V0X3JjPSR7UElQ
-+    echo RVNUQVRVU1swXX0Kc2V0IC1lCmlmIFtbICIkbGF5b3V0X3JjIiAtbmUgMCBdXTsgdGhlbgogICAg
-+    echo ZWNobyAiRVJST1I6IERlYnVnIFRvb2xzIGxheW91dCB2YWxpZGF0aW9uIGZhaWxlZCB3aXRoIGNv
-+    echo ZGUgJGxheW91dF9yYy4iCiAgICBleGl0ICIkbGF5b3V0X3JjIgpmaQoKZWNobyAiWzQvNl0gUmVt
-+    echo b3ZpbmcgY29waWVkIGJ1aWxkIG91dHB1dHMuLi4iCnJtIC1yZiBidWlsZCBkaXN0CgplY2hvICJb
-+    echo NS82XSBCdWlsZGluZyB4ZW11IG5hdGl2ZWx5IHdpdGggTUlOR1c2NC4uLiIKc2V0ICtlCmJhc2gg
-+    echo Li9idWlsZC5zaCAtaiIkSk9CUyIgLS1lbmFibGUtY2Fwc3RvbmUgMj4mMSB8IHRlZSBidWlsZC5s
-+    echo b2cKYnVpbGRfcmM9JHtQSVBFU1RBVFVTWzBdfQpzZXQgLWUKaWYgW1sgIiRidWlsZF9yYyIgLW5l
-+    echo IDAgXV07IHRoZW4KICAgIGVjaG8gIkVSUk9SOiB4ZW11IGJ1aWxkIGZhaWxlZCB3aXRoIGNvZGUg
-+    echo JGJ1aWxkX3JjLiIKICAgIGV4aXQgIiRidWlsZF9yYyIKZmkKCmlmIFtbICEgLWYgZGlzdC94ZW11
-+    echo LmV4ZSBdXTsgdGhlbgogICAgZWNobyAiRVJST1I6IEJ1aWxkIGZpbmlzaGVkIHdpdGhvdXQgZGlz
-+    echo dC94ZW11LmV4ZSIKICAgIGV4aXQgMjIKZmkKCmVjaG8gIk5hdGl2ZSBNSU5HVzY0IGJ1aWxkIGNv
-+    echo bXBsZXRlZCBzdWNjZXNzZnVsbHkuIgo=
-+)
-+certutil -f -decode "%MSYS_SCRIPT_B64%" "%MSYS_SCRIPT_WIN%" >nul 2>&1
-+if errorlevel 1 goto :build_failed
-+del /q "%MSYS_SCRIPT_B64%" >nul 2>&1
-+set "XEMU_TEMP_SOURCE_WIN=%WORK_SOURCE%"
-+echo [2/6] Starting your existing MSYS2 MINGW64 environment...
-+call "%MSYS2_ROOT%\msys2_shell.cmd" -defterm -no-start -mingw64 -c "bash %MSYS_SCRIPT_UNIX%"
-+set "BUILD_RC=%ERRORLEVEL%"
-+del /q "%MSYS_SCRIPT_WIN%" >nul 2>&1
-+if not "%BUILD_RC%"=="0" goto :build_failed
-+
-+echo [6/6] Copying packaged output and logs...
-+if exist "%OUTPUT_ROOT%\dist" rmdir /s /q "%OUTPUT_ROOT%\dist"
-+if exist "%OUTPUT_ROOT%\logs" rmdir /s /q "%OUTPUT_ROOT%\logs"
-+mkdir "%OUTPUT_ROOT%\dist" >nul 2>&1
-+mkdir "%OUTPUT_ROOT%\logs" >nul 2>&1
-+robocopy "%WORK_SOURCE%\dist" "%OUTPUT_ROOT%\dist" /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 >nul
-+if errorlevel 8 goto :output_copy_failed
-+if exist "%WORK_SOURCE%\build.log" copy /y "%WORK_SOURCE%\build.log" "%OUTPUT_ROOT%\logs\build.log" >nul
-+if exist "%WORK_SOURCE%\.xemu-native-build-logs" robocopy "%WORK_SOURCE%\.xemu-native-build-logs" "%OUTPUT_ROOT%\logs" /E /COPY:DAT /R:2 /W:1 >nul
-+if exist "%WORK_SOURCE%\build\meson-logs\meson-log.txt" copy /y "%WORK_SOURCE%\build\meson-logs\meson-log.txt" "%OUTPUT_ROOT%\logs\meson-log.txt" >nul
-+if exist "%WORK_SOURCE%\build\meson-logs\meson-setup.txt" copy /y "%WORK_SOURCE%\build\meson-logs\meson-setup.txt" "%OUTPUT_ROOT%\logs\meson-setup.txt" >nul
-+>"%OUTPUT_ROOT%\BUILD-INFO.txt" echo Builder: v1.08
-+>>"%OUTPUT_ROOT%\BUILD-INFO.txt" echo Run ID: %RUN_ID%
-+>>"%OUTPUT_ROOT%\BUILD-INFO.txt" echo Source: %SOURCE_ROOT%
-+>>"%OUTPUT_ROOT%\BUILD-INFO.txt" echo Built: %DATE% %TIME%
-+if exist "%COPY_LOG%" del /q "%COPY_LOG%" >nul 2>&1
-+echo.
-+echo ============================================================================
-+echo  BUILD SUCCESSFUL
-+echo ============================================================================
-+echo  Executable: %OUTPUT_ROOT%\dist\xemu.exe
-+echo  Logs      : %OUTPUT_ROOT%\logs
-+echo ============================================================================
-+if "%XEMU_KEEP_TEMP%"=="1" (
-+    echo Temporary tree retained: %WORK_SOURCE%
-+) else (
-+    rmdir /s /q "%WORK_ROOT%" >nul 2>&1
-+)
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 0
-+
-+:output_copy_failed
-+echo [ERROR] Build succeeded but output copy failed.
-+goto :build_failed
-+
-+:build_failed
-+if not defined BUILD_RC set "BUILD_RC=1"
-+if exist "%MSYS_SCRIPT_B64%" del /q "%MSYS_SCRIPT_B64%" >nul 2>&1
-+if exist "%MSYS_SCRIPT_WIN%" del /q "%MSYS_SCRIPT_WIN%" >nul 2>&1
-+if exist "%FAIL_ROOT%" rmdir /s /q "%FAIL_ROOT%"
-+mkdir "%FAIL_ROOT%" >nul 2>&1
-+if exist "%COPY_LOG%" copy /y "%COPY_LOG%" "%FAIL_ROOT%\robocopy.log" >nul
-+if exist "%WORK_SOURCE%\build.log" copy /y "%WORK_SOURCE%\build.log" "%FAIL_ROOT%\build.log" >nul
-+if exist "%WORK_SOURCE%\.xemu-native-build-logs" robocopy "%WORK_SOURCE%\.xemu-native-build-logs" "%FAIL_ROOT%" /E /COPY:DAT /R:2 /W:1 >nul
-+if exist "%WORK_SOURCE%\build\meson-logs\meson-log.txt" copy /y "%WORK_SOURCE%\build\meson-logs\meson-log.txt" "%FAIL_ROOT%\meson-log.txt" >nul
-+if exist "%WORK_SOURCE%\build\meson-logs\meson-setup.txt" copy /y "%WORK_SOURCE%\build\meson-logs\meson-setup.txt" "%FAIL_ROOT%\meson-setup.txt" >nul
-+>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Builder: v1.08
-+>>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Run ID: %RUN_ID%
-+>>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Source: %SOURCE_ROOT%
-+>>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Temp: %WORK_SOURCE%
-+>>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Exit code: %BUILD_RC%
-+>>"%FAIL_ROOT%\FAILED-BUILD-INFO.txt" echo Failed: %DATE% %TIME%
-+echo.
-+echo ============================================================================
-+echo  BUILD FAILED
-+echo ============================================================================
-+echo  Run ID: %RUN_ID%
-+echo  Fresh logs: %FAIL_ROOT%
-+echo  Temp tree : %WORK_SOURCE%
-+echo ============================================================================
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 1
-+
-+:source_failed
-+echo [ERROR] xemu source directory/build.sh not found.
-+:fail_early
-+if not defined XEMU_NO_PAUSE pause
-+exit /b 1
-diff --git a/XEMU_RAW_CHEAT_ENGINE.md b/XEMU_RAW_CHEAT_ENGINE.md
-new file mode 100644
-index 0000000..95682b8
---- /dev/null
-+++ b/XEMU_RAW_CHEAT_ENGINE.md
-@@ -0,0 +1,1082 @@
-+# xemu Built-in RAW Cheat Engine - v0.1.17
-+
-+This branch adds a built-in ImGui RAW cheat engine under **Debug > Cheat Engine**.
-+It is an early implementation focused on the address model and
-+conditional behavior discussed for Xbox/xemu.
-+
-+## v0.1.17 Cheat-window UI / cursor changes
-+
-+- Detached Cheat Engine and Memory Viewer windows now own their SDL events; those
-+  events are no longer also sent through the main Xbox-window ImGui backend.
-+- Entering/focusing a detached debug window forces a normal visible desktop cursor,
-+  fixing cases where the game window left SDL's process-global cursor hidden.
-+- Cheat Engine has a menu bar:
-+  - **File > Open** opens `<xemu.exe folder>/Cheats`.
-+  - **File > Reload** reloads the currently matched cheat file.
-+  - **File > Edit/Add Cheats** opens the current text file in the OS-associated
-+    editor, creating a current-game header/file first when none exists.
-+  - **Options** contains Code-Type-Aware D/E, Auto-load Current Game File, and
-+    Engine Enabled. Auto-load and Engine Enabled default ON.
-+  - **Help** opens built-in code-type/example information.
-+- The main cheat pane is reduced to the game/file status, Reload button, a master
-+  Disabled/Enabled button, and the code tree.
-+- Live cheat selection defaults **Disabled**. The tree is gray/non-selectable while
-+  disabled. Switching back to Disabled clears and stops every active cheat. When
-+  Enabled, clicking a cheat or group checkbox immediately activates/deactivates it.
-+- Group labels are rendered blue for easier visual separation.
-+
-+
-+## Memory access
-+
-+The engine runs inside xemu while the main-loop/BQL lock is held by the HUD
-+render path.
-+
-+- **Virtual** access uses `cpu_memory_rw_debug(qemu_get_cpu(0), ...)`, allowing QEMU's
-+  x86 MMU implementation to translate the full 32-bit guest virtual address.
-+- **Physical** access uses `address_space_read/write(&address_space_memory, ...)`.
-+
-+There is no host-process RAM scan and no copied Xbox page-table walker.
-+
-+## Implemented RAW types
-+
-+### 0 / 1 / 2 - basic writes
-+
-+```text
-+0aaaaaaa 000000vv    8-bit write
-+1aaaaaaa 0000vvvv    16-bit write
-+2aaaaaaa vvvvvvvv    32-bit write
-+```
-+
-+With no active type-9 context these are **guest virtual addresses**. The address
-+encoded in the RAW line is used literally; no implicit `0x80000000` base is
-+added. For example, `10000001 000034EB` writes the 16-bit value `0x34EB` to
-+guest virtual address `0x00000001`. Inside a type-9 context, `aaaaaaa` becomes
-+an offset from the current context base and the context selects Virtual/Physical.
-+
-+### Default address-space model
-+
-+The top-level/default address space is **Virtual RAM**. Types 0/1/2/3/4/5/6/7
-+and A therefore operate on guest virtual addresses when they are not wrapped by
-+a type-9 context. Type 9 keeps its existing meanings and is still available for
-+explicit virtual/physical bases and pointer-base chains. In practice, mode 1/3
-+is how a code explicitly switches to physical RAM.
-+
-+### 9 - scoped address context
-+
-+```text
-+9MNNNNNN BBBBBBBB
-+```
-+
-+`M`:
-+
-+```text
-+0 = Virtual direct base
-+1 = Physical direct base
-+2 = Virtual pointer base (read a 32-bit pointer)
-+3 = Physical pointer base (read a 32-bit pointer)
-+```
-+
-+`NNNNNN` is the number of following **physical RAW lines** controlled by this
-+context. `000000` means until the end of the current cheat block.
-+
-+At the top level, `BBBBBBBB` is an absolute address/base. When a type 9 is
-+nested inside another type-9 scope, `BBBBBBBB` is added to the current base.
-+Pointer modes dereference the resulting address and keep the full 32-bit pointer
-+as the new base.
-+
-+Example - full 32-bit virtual base:
-+
-+```text
-+90000003 81200000
-+20000120 000003E7    ; VA 81200120
-+10000130 00000064    ; VA 81200130
-+00000140 000000FF    ; VA 81200140
-+```
-+
-+Example - three-level virtual pointer walk:
-+
-+```text
-+92000001 81200000    ; base1 = Read32(VA 81200000)
-+92000001 00000120    ; base2 = Read32(VA base1 + 120)
-+92000001 00000040    ; base3 = Read32(VA base2 + 40)
-+20000080 000003E7    ; Write32(VA base3 + 80)
-+```
-+
-+Because each scope starts after its own type-9 header, the count-1 pattern above
-+naturally supports stacked pointer levels.
-+
-+### D - level conditional
-+
-+```text
-+Daaaaaaa NNTsvvvv
-+```
-+
-+- `NN` = number of following lines/commands guarded
-+- `T` = compare operator:
-+  - `0` equal
-+  - `1` not equal
-+  - `2` less than
-+  - `3` greater than
-+  - `4` `(mem & value) == 0`
-+  - `5` `(mem & value) != 0`
-+  - `6` `(mem | value) == 0`
-+  - `7` `(mem | value) != 0`
-+- `s`:
-+  - `0` 16-bit physical
-+  - `1` 16-bit virtual
-+  - `2` 8-bit physical
-+  - `3` 8-bit virtual
-+
-+When D is inside a type-9 context, the current context supplies the base and
-+address space; the D address becomes an offset from that base. The size still
-+comes from `s`.
-+
-+When the condition is false, D skips its configured amount.
-+
-+### E - edge-toggle conditional
-+
-+E uses the same field layout as D. A false-to-true edge toggles an internal
-+on/off state; guarded lines run while the switch is on. This is useful for
-+button-press toggles.
-+
-+## D/E skip modes
-+
-+The Cheat Options panel contains:
-+
-+```text
-+[ ] Code-Type-Aware D/E Skip (Experimental)
-+```
-+
-+It defaults **OFF**.
-+
-+### OFF - normal exact-line behavior
-+
-+`NN` means exactly `NN` physical RAW lines. A skipped type-9 header does not
-+activate its scope.
-+
-+Example: D skips 1 before a type-9 header => only the 9 line is skipped.
-+
-+### ON - experimental code-aware behavior
-+
-+`NN` counts logical commands. A type-9 command's logical
-+span includes the type-9 header plus the raw lines it controls. D/E similarly
-+own their guarded raw lines when they themselves are skipped as a logical
-+command.
-+
-+Example:
-+
-+```text
-+D....... 01......
-+90000003 81200000
-+20000020 11111111
-+20000024 22222222
-+20000028 33333333
-+```
-+
-+A failed D with `NN=1` skips all four physical RAW lines in code-aware mode.
-+
-+## Source format
-+
-+The editor accepts normal pairs and CMP-style `$` prefixes:
-+
-+```text
-+20123456 DEADBEEF
-+$20123456 DEADBEEF
-+```
-+
-+`+Name` starts a selectable cheat block. CMP-style `!Group:` / `!!` nesting,
-+`%Credits:`, `{description}`, blank lines, and semicolon-prefixed comments are
-+supported by the file parser.
-+
-+Cheat files are edited externally from **File > Edit/Add Cheats**. If no matching
-+file exists for the current game, xemu creates one with the current Hash/GameID/
-+NAME header in the `Cheats` folder beside `xemu.exe`. **File > Reload** reparses
-+the current text file.
-+
-+## GitHub Actions / Windows source extraction note
-+
-+Some Windows ZIP extraction/recommit workflows can strip Unix executable bits from shell scripts.
-+The bundled workflows invoke `scripts/archive-source.sh` and `build.sh` explicitly through `bash`,
-+so GitHub Actions does not depend on those files retaining mode `+x`.
-+
-+## Added RAW types 3-7
-+
-+### Type 3 - arithmetic
-+
-+```text
-+300000VV 0AAAAAAA    8-bit increment
-+301000VV 0AAAAAAA    8-bit decrement
-+3020VVVV 0AAAAAAA    16-bit increment
-+3030VVVV 0AAAAAAA    16-bit decrement
-+30400000 0AAAAAAA    32-bit increment
-+VVVVVVVV 00000000
-+30500000 0AAAAAAA    32-bit decrement
-+VVVVVVVV 00000000
-+```
-+
-+### Type 4 - 32-bit serial write
-+
-+```text
-+4AAAAAAA NNNNSSSS
-+VVVVVVVV IIIIIIII
-+```
-+
-+Writes `NNNN` 32-bit values. Address advances by `SSSS * 4`; value advances by `IIIIIIII`.
-+
-+### Type 5 - byte copy
-+
-+```text
-+5AAAAAAA NNNNNNNN
-+DDDDDDDD 00000000
-+```
-+
-+Copies `NNNNNNNN` bytes from A to D. A 16 MiB per-command safety limit is used to prevent accidental enormous allocations.
-+
-+### Type 6 - pointer write
-+
-+```text
-+6AAAAAAA VVVVVVVV
-+000TNNNN OOOOOOOO
-+OOOOOOOO OOOOOOOO ...
-+```
-+
-+`T=0/1/2` writes 8/16/32 bits. `NNNN` is the offset count. The first offset is the second word of the descriptor line and further offsets are packed two per line. When wrapped by a type-9 context, the base and every pointer dereference use that context's physical/virtual address space. Full 32-bit Xbox pointers are preserved; the PS2 `0x3FFFFFFC` pointer mask is intentionally not used.
-+
-+### Type 7 - bitwise
-+
-+```text
-+7AAAAAAA 00T0VVVV
-+```
-+
-+`T=0/1` byte/halfword OR, `T=2/3` byte/halfword AND, `T=4/5` byte/halfword XOR.
-+
-+### D/E skip interaction
-+
-+With **Code-Type-Aware D/E Skip OFF**, D/E counts literal RAW lines exactly as before. With it ON, type 3 word arithmetic, types 4/5, variable-length type 6, and xemu type A report their complete logical span so a logical skip does not land in continuation data.
-+
-+### Type A - xemu raw-byte fill/write
-+
-+```text
-+AXXXXXXX ZZZZZZZZ
-+DDDDDDDD DDDDDDDD
-+```
-+
-+This is an **xemu-specific** replacement for the original CodeBreaker type-A setup meaning.
-+
-+- `XXXXXXX` = destination virtual address by default, or offset from the current type-9 context.
-+- `ZZZZZZZZ` = total number of bytes to write.
-+- Each continuation RAW line supplies exactly eight literal bytes, so the engine automatically consumes `ceil(ZZZZZZZZ / 8)` continuation lines.
-+- Continuation lines are treated as one literal byte stream in the exact left-to-right hexadecimal order shown. They are **not** endian-swapped as 32-bit values.
-+- On the final continuation line, bytes beyond the requested total are ignored.
-+
-+Example:
-+
-+```text
-+A006C320 00000006
-+0F85A900 00000000
-+```
-+
-+writes these six consecutive bytes at `0x006C320`:
-+
-+```text
-+0F 85 A9 00 00 00
-+```
-+
-+A longer example writes 12 bytes and therefore consumes two continuation lines:
-+
-+```text
-+A006C320 0000000C
-+0F85A900 12345678
-+90ABCDEF 11223344
-+```
-+
-+The resulting byte stream is `0F 85 A9 00 12 34 56 78 90 AB CD EF`; the unused trailing `11 22 33 44` is ignored.
-+
-+Inside any type-9 context the same `XXXXXXX` field is an offset from that context base; mode 0/2 uses virtual memory and mode 1/3 uses physical memory.
-+
-+In normal D/E exact-line mode, type A occupies one header line plus however many physical continuation lines are required by the byte count. In experimental code-aware mode, the complete A header plus all of its continuation lines are treated as one logical command.
-+
-+Types `8`, `B`, and `C` remain intentionally unsupported because their CodeBreaker meanings are setup/master-engine controls rather than ordinary Xbox memory operations. Type `F` is repurposed by this Windows-only v0.1.42 backport for automatic external x86 code caves; see the Type-F section at the end of this document.
-+
-+## v0.1.6 C/C++ QEMU bridge fix
-+
-+The ImGui cheat-engine frontend is C++, but several QEMU CPU/memory headers use
-+GNU C-only constructs. The frontend no longer includes those headers directly.
-+Guest CPU/memory access is isolated in `ui/xui/cheat-engine-memory.c`, compiled
-+as C, with a small plain-C API declared in `cheat-engine-memory.h`.
-+
-+This avoids MinGW/GCC C++ failures involving `typeof_strip_qual`, GNU `typeof`,
-+reserved identifiers such as `class`, and QEMU atomic/RCU macro expansion.
-+
-+## v0.1.7 Memory Viewer / Search
-+
-+A new **Debug > Memory Viewer / Search** window provides three tabs:
-+
-+- **Physical Memory** - reads/writes the Xbox physical address space directly.
-+- **Virtual Memory** - reads/writes through the Xbox CPU virtual address translation.
-+- **Search / Compare** - scans either physical or virtual memory and refines results.
-+
-+### Memory viewers
-+
-+Each viewer shows 0x100 bytes at a time as 16-byte hex/ASCII rows, supports a
-+hexadecimal **Go To** address, `-100` / `+100` paging, and direct 8/16/32-bit
-+read/write controls.
-+
-+### Search / Compare
-+
-+Supported value types:
-+
-+- UInt8 / UInt16 / UInt32
-+- Int8 / Int16 / Int32
-+- Float32
-+
-+First scans can use **Exact Value** or **Unknown Initial**. Unknown Initial
-+captures a snapshot of the chosen range and waits for a subsequent comparison.
-+Next-scan comparisons include:
-+
-+- Exact Value
-+- Not Equal Value
-+- Changed / Unchanged
-+- Increased / Decreased
-+- Greater Than Value / Less Than Value
-+
-+Scans can use aligned values or byte-by-byte stepping. The range is user
-+selectable, with quick presets for 64 MB physical RAM, 128 MB physical RAM,
-+and the `0x80000000-0x83FFFFFF` virtual window. A single scan is capped at
-+256 MB as a safety guard against accidentally snapshotting most of the 4 GB
-+virtual address space.
-+
-+Double-clicking a result sends its address to the matching Physical or Virtual
-+viewer and selects it for direct reading/writing.
-+
-+## Current Game Manager (v0.1.8)
-+
-+`Debug -> Current Game` tracks the XBE currently loaded by xemu and exposes a
-+shared game identity to the Cheat Engine and Memory Tools.
-+
-+Tracked fields:
-+
-+- XBE title name
-+- 32-bit Title ID
-+- region flags
-+- disc number
-+- XBE version
-+- XBE base and image size
-+- PE checksum and timestamp
-+- SHA-256 of the XBE header block
-+- a compact revision key: `TITLEID-<first 16 SHA256 hex chars>`
-+
-+The manager refreshes twice per second and increments an internal generation
-+counter whenever the Title ID/revision identity changes. The header hash is
-+computed over xemu's copied XBE header block rather than writable game RAM so
-+normal gameplay does not change the revision identity.
-+
-+## CMP-style game files and tree UI (v0.1.9)
-+
-+The Cheat Engine auto-loads per-game `.txt` files from a `Cheats` folder
-+beside the running xemu executable. For example:
-+
-+```text
-+C:\Emulators\xemu\xemu.exe
-+C:\Emulators\xemu\Cheats\
-+```
-+
-+The folder is resolved from the executable itself, not from the process working
-+directory and not from xemu's AppData/settings path. If it does not exist, xemu
-+creates it when current-game cheat loading is attempted.
-+
-+The filename is for readability. A recommended filename is:
-+
-+```text
-+EA009E-<first-16-XBE-SHA256>.txt
-+```
-+
-+The file header is authoritative when matching a running XBE:
-+
-+```text
-+^1 = Hash: 7A91C23F571082A4
-+^2 = GameID: EA009E
-+^3 = NAME: Need for Speed: Carbon
-+```
-+
-+`GameID` accepts either the compact CMP-style publisher form or the normal
-+8-hex-digit Xbox Title ID. These are treated as identical:
-+
-+```text
-+^2 = GameID: EA009E
-+^2 = GameID: 4541009E
-+```
-+
-+The hash may be the complete XBE-header SHA-256 or a hexadecimal prefix of it.
-+Longer matching hashes are preferred if multiple files match the same title.
-+
-+### Groups
-+
-+CMP-style groups and nested groups are parsed into the visible cheat tree:
-+
-+```text
-+!Player Codes:
-+
-++Infinite Health{Keeps player health at maximum.}
-+%Credits: Skiller
-+$20012340 00000064
-+
-+!Money Codes:
-++Infinite Money
-+%Credits: Skiller>Another Author
-+$20012344 3B9AC9FF
-+!!
-+
-+!!
-+```
-+
-+`!Name:` opens a group and `!!` closes one group level. Group checkboxes select
-+or clear every cheat beneath that group, including nested groups.
-+
-+### Live selection / master Disabled-Enabled button
-+
-+The cheat list starts **Disabled**. While disabled, the entire tree is gray and
-+non-selectable, and no cheat block is active. Press the master **Disabled**
-+button to switch it to **Enabled**. Once enabled, checking or unchecking an
-+individual cheat immediately activates/deactivates that block. Group checkboxes
-+apply the same live state recursively to all cheats beneath the group.
-+
-+Pressing **Enabled** again switches the master state back to **Disabled**, clears
-+all checkmarks, stops every active cheat, and resets edge-toggle state. The
-+separate **Options > Engine Enabled** switch defaults ON and controls whether the
-+runtime engine executes at all.
-+
-+When the Current Game Manager detects a different XBE, active codes are stopped
-+and the executable-root `Cheats` folder is searched for a file whose `^1 Hash` and `^2 GameID`
-+match the new game. The previous game's codes are never left active across a
-+game change.
-+
-+
-+## Full RAM dump (v0.1.14)
-+
-+`Debug -> Memory Viewer / Search -> Dump RAM` now creates one complete physical
-+RAM image plus a page-table-driven dump of every contiguous guest virtual
-+region that is actually backed by installed Xbox RAM. Pressing **DUMP PHYSICAL
-++ MAPPED VIRTUAL RAM (Pause Game)** stops the guest first and leaves it paused
-+after dumping so every output file represents the same stopped state.
-+
-+The physical dump follows the Xbox machine's configured RAM size (normally
-+64 MB, with larger developer/debug configurations handled automatically):
-+
-+- Physical dump: `0x00000000` through `RAM_SIZE - 1`.
-+- Virtual scan: the complete 32-bit guest range `0x00000000-0xFFFFFFFF`.
-+
-+For the virtual side, xemu synchronizes the CPU state and uses the same QEMU
-+virtual-to-physical page translation mechanism used by xemu's XBE reader. Each
-+4 KB virtual page is tested. Pages are included only when they translate to a
-+physical address inside installed Xbox RAM; MMIO/device mappings are excluded.
-+Adjacent included virtual pages are merged into one region file. Physical pages
-+inside a virtual region do not need to be physically contiguous. Aliases are
-+preserved, so the same physical RAM may legitimately appear in more than one
-+virtual region.
-+
-+Files are written beside the running xemu executable in `Ram-Dumps/` (for
-+example `C:\Emulators\xemu\Ram-Dumps\` when `xemu.exe` is in
-+`C:\Emulators\xemu\`). The path is resolved from the executable itself,
-+not the process working directory or the user's AppData/settings path.
-+
-+A dump set contains:
-+
-+```text
-+EA009E-7A91C23F571082A4-20260809-142400-PHYSICAL-00000000.bin
-+EA009E-7A91C23F571082A4-20260809-142400-VIRTUAL-MAP.txt
-+EA009E-7A91C23F571082A4-20260809-142400-VIRTUAL-00010000-0038FFFF.bin
-+EA009E-7A91C23F571082A4-20260809-142400-VIRTUAL-80000000-83FFFFFF.bin
-+...
-+```
-+
-+The exact virtual filenames depend on the mappings present in the running game.
-+`VIRTUAL-MAP.txt` records every discovered region, its virtual start/end, its
-+size, and the corresponding `.bin` filename. File offset zero in each virtual
-+region file corresponds to that region's virtual start address. For example,
-+file offset `0x1234` in a region beginning at `0x00600000` represents guest
-+virtual address `0x00601234`.
-+
-+
-+
-+## Detached desktop tool windows (v0.1.16)
-+
-+**Debug > Cheat Engine** and **Debug > Memory Viewer / Search** now open as
-+independent desktop windows instead of drawing over the Xbox framebuffer.
-+They remain part of the same xemu process and continue using the same cheat,
-+current-game, memory, search, and RAM-dump state.
-+
-+The two windows can be moved, resized, minimized, maximized, or placed on
-+another monitor independently of the main xemu game window. Closing a debug
-+tool window hides it only; selecting the corresponding Debug menu item opens
-+that same tool/state again.
-+
-+The detached windows use their own SDL/OpenGL/ImGui rendering contexts. The
-+main xemu renderer is restored after each debug-tool frame, and the SDL event
-+watch now filters expose/resize events by the actual console window so resizing
-+a detached debugger window is not treated as a game-window resize.
-+
-+## Memory editor and x86 debugger (v0.1.18)
-+
-+The detached **Memory Viewer / Search** window now includes an **x86 Debugger**
-+tab. Disassembly uses QEMU's target-aware monitor disassembler against guest
-+virtual memory, so addresses are literal Xbox virtual addresses (for example
-+`006C32C` means virtual `0x006C32C`; no implicit `0x80000000` is added).
-+
-+The debugger includes execute breakpoints, Pause/Resume, Go to EIP, optional
-+Follow EIP, a register panel, and a retained register snapshot from the last
-+execute breakpoint hit. The register display includes the 32-bit GPRs, EIP,
-+linear PC, EFLAGS, segment selectors, and CR0/CR2/CR3/CR4. Execute breakpoints
-+use QEMU CPU breakpoints and are compatible with xemu's WHPX execute-breakpoint
-+implementation as well as TCG's BP_GDB handling.
-+
-+The old **Read / Write Value** panel was removed. Physical and Virtual memory
-+views now have **Enable Memory Writing**. When enabled, each byte in the hex
-+grid becomes editable; press Enter in a byte cell to write `00-FF` directly to
-+that address. Memory writing starts disabled.
-+
-+The Search / Compare **First Scan** mode selector and **First Scan** button now
-+use different ImGui IDs, fixing the duplicate-ID assertion that appeared when
-+hovering the control.
-+
-+Read/write watchpoints are not enabled in this revision. xemu's WHPX backend
-+has explicit support for QEMU execute breakpoints but does not currently expose
-+a corresponding generic CPU watchpoint path like TCG does.
-+
-+## x86 debugger target-header build fix (v0.1.19)
-+
-+The debugger bridge no longer includes `target/i386/cpu.h`. QEMU intentionally
-+poisons target-only macros such as `TARGET_X86_64` in common compilation units,
-+which caused the Windows/MXE build to fail when the v0.1.18 bridge included the
-+i386 target header directly.
-+
-+Register capture now goes through QEMU's generic GDB register interface. The
-+per-target i386 gdbstub remains responsible for reading the actual architectural
-+register state, while the xui bridge only handles plain register names and
-+32-bit values. This keeps the C/C++ separation intact and avoids leaking target
-+headers into the common UI build.
-+
-+## v0.1.21 - x86 disassembler backend fix
-+
-+The Windows Release workflow now supplies the Capstone x86 decoder explicitly. The detached x86 Debugger disassembles literal guest virtual addresses in Intel syntax and reports unmapped addresses separately from a missing decoder backend.
-+
-+## v0.1.22 - Capstone MXE archive-tool build fix
-+
-+The Windows x86_64 Release workflow now resolves the MXE compiler/binutils with `command -v` and passes their absolute paths to Capstone's CMake build. The standalone Capstone build uses the normal MinGW `ar`/`ranlib` pair instead of hard-coding `gcc-ar`/`gcc-ranlib`, preventing CMake from looking for `x86_64-w64-mingw32.static-gcc-ar` under the GitHub workspace. Runtime debugger behavior is unchanged from v0.1.21.
-+
-+## v0.1.23 - Capstone Meson Dependency Fix
-+
-+- Fixed the Windows build failure where `CONFIG_CAPSTONE` was enabled but
-+  `ui/xui/cheat-engine-memory.c` could not resolve `<capstone.h>`.
-+- The debugger bridge now explicitly inherits Meson's `capstone` dependency,
-+  which supplies the pkg-config include path and linker flags.
-+- The Windows workflow now compiles a tiny `<capstone.h>` smoke-test object with
-+  the MXE cross compiler before configuring xemu.
-+
-+## Memory Map / Virtual Alias Explorer (v0.1.24)
-+
-+The detached **Memory Viewer / Search** window now includes a **Memory Map**
-+tab. It walks the complete 32-bit Xbox guest virtual address space in 4 KB
-+pages using QEMU's existing debug page translation and keeps only mappings
-+backed by installed Xbox physical RAM. MMIO/device mappings are excluded.
-+
-+The map can:
-+
-+- translate a literal guest virtual address to its current physical RAM address;
-+- take a physical RAM address and list every guest virtual alias that maps to
-+  the same physical byte;
-+- double-click an alias to jump directly to it in the Virtual Memory viewer;
-+- jump a resolved physical address directly into the Physical Memory viewer;
-+- display linear mapping regions, merging pages only when both the virtual and
-+  physical sides remain contiguous;
-+- show mapped virtual-page count, unique physical-page count, and alias-page
-+  count for the current snapshot.
-+
-+The map is a snapshot of the current CPU page tables. It is invalidated when
-+Current Game Manager detects a different title/revision; press **Refresh Memory
-+Map** after a game/major executable transition to rebuild it.
-+
-+Example:
-+
-+```
-+Virtual  006C32C -> Physical 021A732C
-+
-+Physical 021A732C aliases:
-+  006C32C
-+  806C32C
-+  A06C32C
-+```
-+
-+Multiple virtual addresses may legitimately resolve to the same physical RAM
-+page. The reverse alias list is generated by walking all RAM-backed virtual
-+page mappings; it is not assumed from a fixed 0x80000000 mirror.
-+
-+## Unified Physical / Memory Map / Virtual Workspace (v0.1.25)
-+
-+The detached Memory Viewer now combines the previous Physical Memory, Memory
-+Map, and Virtual Memory tabs into one side-by-side workspace:
-+
-+```
-+Physical RAM | Memory Map | Virtual RAM
-+```
-+
-+The Physical pane spans the machine's complete installed RAM (64 MB, 128 MB,
-+or another configured size). The center pane contains the current RAM-backed
-+virtual-to-physical mappings. Clicking a mapping selects that virtual alias and
-+positions both memory panes at the corresponding start addresses.
-+
-+The two memory panes stay synchronized through the selected map. Virtual
-+navigation always resolves to Physical. Physical navigation keeps the selected
-+virtual alias while it covers the physical address, then chooses another
-+current mapping if necessary.
-+
-+Memory writing is disabled by default. When enabled, a byte can be edited by
-+clicking its hex cell and typing two hexadecimal digits. The second digit
-+commits immediately; Enter is not required.
-+
-+The Cheat Engine Help popup now uses fixed line breaks and indented field
-+explanations for code formats. Type 9 is shown as:
-+
-+```
-+9MCCCCCC  BBBBBBBB
-+M = Type
-+    0 = Virtual Base
-+    1 = Physical Base
-+    2 = Virtual Pointer Base
-+    3 = Physical Pointer Base
-+C = Count
-+    000000 = Continue Until End of Cheat
-+B = Offset / Base Address
-+```
-+
-+
-+## Linked Compact Memory Grid (v0.1.26)
-+
-+The unified Memory tab links exact byte selections between Physical and Virtual RAM.
-+Clicking a byte on either side highlights the translated byte/row on the other side
-+using the currently selected Memory Map alias. The hex grids use compact fixed-width
-+columns (`00000000 | 00 | 00 | ...`). Memory Writing uses the selected byte directly:
-+click a cell and type two hex digits; the second digit writes immediately and advances
-+to the next byte.
-+
-+## Memory Navigation / Cross-Highlight Fix (v0.1.27)
-+
-+Virtual **Go** now searches the complete current RAM-backed virtual map rather
-+than only the mapping currently selected in the center pane. For example, if
-+`00579000` maps to physical `0087C000`, entering `00579000` selects that map
-+region and synchronizes the Physical pane to `0087C000`.
-+
-+Cross-highlighting now preserves the opposite pane's viewport. If the paired
-+physical/virtual byte is already visible, only its byte/row highlight changes;
-+the row stays at its existing screen position. The paired pane scrolls only
-+when the target address is outside its visible range or when synchronization
-+requires switching to another mapped virtual region.
-+
-+## Linked Virtual / Physical x86 Debugger + Clean Continue (v0.1.28)
-+
-+The x86 Debugger now presents the currently decoded instruction stream in two
-+linked panes: **Virtual x86 (CPU / EIP)** and **Physical x86 (backing RAM)**.
-+Each decoded virtual instruction is translated independently through the
-+current Xbox page tables, so the Physical pane remains correct even when two
-+consecutive virtual pages are backed by non-contiguous physical pages. Clicking
-+a row in either pane selects the same instruction in both panes, and their
-+vertical scrolling is linked.
-+
-+Execute breakpoints remain Virtual addresses because the x86 CPU executes the
-+virtual/linear PC. The breakpoint list now also shows each breakpoint's live
-+Physical translation. When a breakpoint fires, the debugger snapshots both the
-+Virtual PC and its Physical backing address at the instant of the hit.
-+
-+**Resume** from an execute breakpoint now performs an invisible one-instruction
-+single-step before continuing. This prevents TCG from immediately re-triggering
-+the same execute breakpoint at the unchanged PC, while remaining compatible
-+with WHPX's own breakpoint step-over path. **Step Into** exposes the same
-+single-step mechanism to the user and Follow EIP refreshes both disassembly
-+panes after each completed step or breakpoint hit.
-+
-+The Virtual-to-Physical helper now reports the exact translated byte address,
-+including the offset within the 4 KB page. For example, if `00579000` maps to
-+`0087C000`, then `00579003` is reported as `0087C003`.
-+
-+## TARGET_PAGE_MASK Compile Fix (v0.1.29)
-+
-+v0.1.28 added exact byte-offset Virtual-to-Physical translation and referenced
-+`TARGET_PAGE_MASK` from `ui/xui/cheat-engine-memory.c`. That C translation unit
-+did not directly include the QEMU header that defines the macro, causing the
-+Windows/MXE build to fail with `TARGET_PAGE_MASK undeclared`.
-+
-+v0.1.29 directly includes `exec/target_page.h`. No runtime behavior was changed.
-+
-+## Memory Writing Input Fix (v0.1.30)
-+
-+The compact Memory workspace no longer polls Dear ImGui's raw
-+`InputQueueCharacters` after rendering the window. The selected byte becomes a
-+compact in-cell `InputText` only while Memory Writing is enabled. Its existing
-+2-digit value is automatically selected; typing two hexadecimal digits writes
-+immediately and advances to the next byte. No Enter key or separate value field
-+is required. The actual Physical and Virtual write backends are unchanged.
-+
-+
-+## Native Breakpoint Resume Cleanup (v0.1.31)
-+
-+The debugger continues to use QEMU/xemu CPU execute breakpoints as guest
-+Virtual addresses and keeps the linked Virtual/Physical disassembly and
-+breakpoint translation display from v0.1.28. Resume behavior is now selected
-+by the active accelerator instead of applying the same custom step-over path
-+to every backend.
-+
-+- **WHPX:** Resume calls normal VM Continue. The existing WHPX backend detects
-+  that PC is on an active CPU breakpoint, temporarily restores the original
-+  instruction, single-steps it exclusively, reinstalls the breakpoint, and
-+  continues. The Memory Tools window no longer adds a second single-step on
-+  top of WHPX.
-+- **TCG:** Resume from an execute breakpoint retains the one-instruction
-+  single-step helper because TCG checks a CPU breakpoint before executing the
-+  instruction at the unchanged PC. TCG's own single-step path intentionally
-+  overrides breakpoints for that instruction, allowing forward progress.
-+- **Step Into:** remains an explicit architectural single-step on either
-+  backend.
-+
-+The x86 Debugger status line displays the active breakpoint backend so test
-+runs make it clear whether native WHPX or TCG behavior is being used.
-+
-+## Safe Breakpoint Mutation Fix (v0.1.32)
-+
-+Execute breakpoint add/remove operations are now serialized against a running
-+vCPU. The detached debugger UI must not modify `CPUState::breakpoints` while
-+WHPX is concurrently walking that queue to build its low-level breakpoint
-+collection.
-+
-+When the guest is running, breakpoint changes now use this sequence:
-+
-+```text
-+Pause all vCPUs
-+  -> modify QEMU CPU breakpoint list
-+  -> resume guest
-+```
-+
-+When the guest is already paused or stopped by the debugger, the breakpoint
-+list is changed in place and the guest remains paused. This provides WHPX with
-+a clean stop/start boundary to translate CPU breakpoints into its native INT1
-+(0xF1) implementation.
-+
-+## Source Layout (v0.1.33+)
-+
-+Custom xemu tooling is isolated under:
-+
-+```text
-+ui/xui/debug-tools/
-+```
-+
-+The folder owns the RAW Cheat Engine, Current Game manager, detached tool
-+windows, Physical/Map/Virtual memory workspace, RAM search/dump UI, x86
-+debugger UI, and the C bridge into QEMU/xemu memory/debug facilities.
-+
-+The normal xemu source tree only keeps small integration hooks in
-+`ui/xui/main.cc`, `ui/xui/menubar.cc`, `ui/xui/meson.build`, and the detached
-+window event filter in `ui/xemu.c`. This separation is intentional so future
-+upstream xemu updates can be rebased without mixing the custom implementation
-+throughout the normal XUI files.
-+
-+
-+## Josh Native Breakpoint Backend Integration (v0.1.34)
-+
-+The cleaned `debug-tools` layout now contains a target-specific debugger
-+backend under:
-+
-+```text
-+ui/xui/debug-tools/backend/
-+    xemu-dbg.c
-+    xemu-dbg.h
-+```
-+
-+This follows the architecture in Josh's xemu debugger fork. The C++ Memory
-+Tools window does not manipulate QEMU breakpoint queues itself. It calls a
-+plain-C bridge, which delegates Execute and data breakpoint operations to the
-+target-specific backend.
-+
-+Execute breakpoints use QEMU's normal `BP_GDB` CPU breakpoint representation:
-+
-+```text
-+Virtual address
-+    -> cpu_breakpoint_insert(... BP_GDB ...)
-+    -> QEMU CPU breakpoint list
-+    -> TCG native debugger handling
-+       or WHPX's existing CPU-breakpoint translation
-+```
-+
-+The custom v0.1.32 pause/mutate/resume wrapper is no longer used for Execute
-+breakpoint insertion/removal. This intentionally tests the same direct native
-+breakpoint path used by Josh's debugger implementation.
-+
-+The x86 Debugger exposes data watchpoints under both TCG and WHPX:
-+
-+```text
-+Read
-+Write
-+Read / Write
-+Length: 1+ bytes
-+```
-+
-+TCG consumes QEMU's `CPUState::watchpoints` directly. Under WHPX, v0.1.38
-+mirrors those same watchpoints into the x86 hardware debug registers DR0-DR3.
-+Write and Read/Write use native DR7 data conditions. Read-only uses a paired
-+Read/Write + Write slot and filters the write case by inspecting DR6. WHPX has
-+four hardware slots total, so large/unaligned ranges or multiple Read-only
-+watchpoints can exhaust the available slots.
-+
-+A watchpoint hit reports both address spaces for the watched data and follows
-+the x86 instruction that performed the access. For example:
-+
-+```text
-+WRITE watchpoint hit:
-+  data        V 00579000 -> P 0087C000
-+  instruction V 00123456 -> P 012AB456
-+```
-+
-+
-+## v0.1.39 - Full-page breakpoint disassembly
-+
-+The x86 debugger can now display the complete 4 KiB virtual page containing the
-+selected address. `Full Page` is the default view, while the previous `Count` mode
-+remains available. Breakpoint/watchpoint hits with Follow EIP enabled automatically
-+open the full page and position the stop below the middle of the pane so earlier
-+instructions remain visible. The architectural debugger stop row is highlighted in
-+light blue in both the Virtual and Physical panes. For x86 hardware data watchpoints,
-+this stop EIP is normally the instruction immediately after the memory access because
-+architectural #DB is reported after the access completes.
-+
-+
-+## v0.1.40 - Actual watchpoint-access highlight
-+
-+For Execute breakpoints, the persistent light-blue row remains the instruction
-+that owns the execute breakpoint. For Read/Write data watchpoints, x86 reports
-+#DB after the memory-access instruction has completed, so the debugger now
-+resolves the decoded instruction whose end address equals the architectural
-+stop EIP and highlights that access instruction instead.
-+
-+Example:
-+
-+```text
-+0009D411  mov [eax+58],ecx   <- LIGHT BLUE: actual WRITE
-+0009D414  mov eax,ecx        <- Current EIP after #DB
-+```
-+
-+The status line reports the watched data address, resolved access-instruction
-+address, and current EIP separately. If an instruction cannot be resolved
-+cleanly, the UI falls back to the architectural stop EIP rather than guessing.
-+All v0.1.40 implementation changes remain inside `ui/xui/debug-tools/`.
-+
-+
-+## Windows-only v0.1.42 backport - finalized Type F external x86 caves
-+
-+This backport keeps the v0.1.42 Windows-only source/build layout and adds only the
-+finalized Type-F runtime design plus the later WHPX one-shot Step Into behavior.
-+
-+Type F executes real guest x86 from xemu-owned RAM outside the Xbox
-+`machine->ram_size`. The private pages are mapped into a 1 MiB guest virtual arena
-+beginning at `0x68000000`; cheat authors do not choose or need to know the cave
-+address. Caves are allocated automatically on 16-byte boundaries.
-+
-+A leading `$` is optional on every Type-F line.
-+
-+### F0 - assembly cave (recommended)
-+
-+```text
-+$F0000000 AAAAAAAA
-+$<32-bit Intel-syntax x86 instructions and labels>
-+$DEADCODE
-+```
-+
-+`A` is the virtual hook address, or an offset under an active Virtual Type-9
-+context. The low 24 bits in `F0000000` are reserved and must be zero.
-+
-+Example:
-+
-+```text
-+$F0000000 0009D411
-+$mov dword ptr [eax+58],054C5638
-+$mov eax,ecx
-+$DEADCODE
-+```
-+
-+Bare F0 numeric literals are hexadecimal. Local labels and relative `JMP`, `CALL`,
-+and Jcc branches are assembled automatically.
-+
-+### F0 static data and preservation (v0.1.62)
-+
-+F0 can attach 32-bit static data to the same cave allocation with `DD`. A label
-+resolves to the final guest virtual address automatically:
-+
-+```text
-+$F0000000 0008C5A2
-+$PRESERVE ECX, EDX
-+$mov edx,CarList
-+$mov ecx,6
-+$CheckCar:
-+$cmp eax,dword ptr [edx]
-+$je Success
-+$add edx,4
-+$loop CheckCar
-+$RESTORE
-+$jmp Original
-+$Success:
-+$RESTORE
-+$mov eax,1
-+$mov ecx,[ebp+8]
-+$mov [ecx],eax
-+$pop esi
-+$pop ebp
-+$ret 8
-+$Original:
-+$mov cl,[0046D784]
-+$DEADCODE
-+
-+$CarList:
-+$dd 01D28710, 8B80C5FC, E3BDE8CB
-+$dd 0001308E, 60D6890E, 0689441B
-+```
-+
-+`DD` values are emitted as ordinary little-endian dwords. DD declarations may
-+appear after `DEADCODE` for readability; xemu still owns them as part of that F0
-+block and lays the cave out as `code | generated return JMP | DD data`. The cave
-+allocator sizes the whole layout before installing the hook, so another cave can
-+never overlap an attached list. If an edited cave grows, only that cave is moved;
-+other active caves never shift.
-+
-+F0 also accepts assembler directives for temporary register preservation:
-+
-+```text
-+$PRESERVEALL
-+$PRESERVE EAX, ECX, EDX
-+$RESTORE
-+$RESTORE ECX, EDX
-+```
-+
-+For cheat-file familiarity, `PRESERVE, EAX` and `RESTORE, EAX` are accepted as
-+alias spellings for the same selective directives.
-+
-+`PRESERVEALL` saves EAX, EBX, ECX, EDX, ESI, EDI, EBP, and EFLAGS. ESP and EIP
-+are intentionally excluded. Adjacent PRESERVE lines accumulate into one frame.
-+RESTORE with no list restores everything still saved in the top frame; selective
-+RESTORE restores/clears only the named registers. RESTORE with no active frame is
-+a no-op.
-+
-+The existing 1 MiB xemu-owned mapping is split internally:
-+
-+```text
-+68000000-680EFFFF   F0/F1 executable code + DD data (960 KiB)
-+680F0000-680FFFFF   private PRESERVE storage       (64 KiB)
-+```
-+
-+Each F0 hook using preservation receives a private block with a depth counter and
-+16 nested frames. Restored slots are zeroed, fully restored frames are cleared and
-+reused, and the whole preservation block is zeroed/freed when the owning cave is
-+disabled and safe to reclaim. This storage remains outside Xbox machine RAM.
-+
-+### F0 assembler coverage (v0.1.61)
-+
-+The built-in assembler now accepts the normal 32-bit Xbox general-purpose
-+registers plus 16-bit (`AX..DI`) and legacy 8-bit (`AL..BH`) register forms.
-+Common supported families include:
-+
-+- `MOV`, `MOVZX`, `MOVSX`, `LEA`
-+- `ADD`, `ADC`, `SUB`, `SBB`, `AND`, `OR`, `XOR`, `CMP`, `TEST`
-+- `INC`, `DEC`, `NEG`, `NOT`
-+- `IMUL`, `MUL`, `DIV`, `IDIV`
-+- `SHL/SAL`, `SHR`, `SAR`, `ROL`, `ROR`, `SHLD`, `SHRD`
-+- `PUSH`, `POP`, `PUSHAD/POPAD`, `PUSHFD/POPFD`
-+- `JMP`, `CALL`, Jcc, `LOOP/LOOPE/LOOPNE`, `JECXZ`, `RET`, `RET imm16`
-+- `SETcc`, `CMOVcc`
-+- `XCHG`, `XADD`, `CMPXCHG`, `BSWAP`, `BSF`, `BSR`, `BT/BTS/BTR/BTC`
-+- `LAHF`, `SAHF`, `CLC`, `STC`, `CMC`, `CLD`, `STD`, `CBW`, `CWDE`, `CWD`,
-+  `CDQ`, `LEAVE`, `INT3`, `IRET`
-+- `MOVS*`, `STOS*`, `LODS*`, `SCAS*`, `CMPS*` with `REP/REPE/REPNE`
-+
-+F0 is still deliberately a compact cheat-code assembler rather than a full
-+general-purpose x86 toolchain. FPU/MMX/SSE/SSE2 or another unsupported form can
-+still be supplied through F1 raw bytes.
-+
-+The previous DLC example that required raw F1 can now be written directly as:
-+
-+```text
-+$F0000000 0008C5A2
-+$cmp eax,0689441B
-+$jne Original
-+$mov eax,00000001
-+$mov ecx,dword ptr [ebp+08]
-+$mov dword ptr [ecx],eax
-+$pop esi
-+$pop ebp
-+$ret 0008
-+$Original:
-+$mov cl,byte ptr [0046D784]
-+$DEADCODE
-+```
-+
-+### F1 - aligned raw hexadecimal cave
-+
-+```text
-+$F1000000 AAAAAAAA
-+$XXXXXXXX YYYYYYYY
-+$XXXXXXXX YYYYYYYY
-+$DEADCODE 000000NN
-+```
-+
-+Every F1 payload line contains exactly eight literal bytes as two 32-bit words.
-+`NN` must be `01` through `08` and gives the number of meaningful bytes in the
-+final payload line. Remaining bytes in that final line must be `00` padding and
-+are not copied to executable memory. The generated return JMP is placed directly
-+after the final meaningful byte.
-+
-+For both F0 and F1, xemu uses Capstone at the hook address to span the smallest
-+number of whole instructions totaling at least five bytes (maximum 32), saves those
-+bytes, installs a 5-byte `JMP rel32` to the allocated cave, NOP-fills any extra
-+overwrite bytes, and appends a generated JMP back at `DEADCODE`. Disabling the cave
-+restores the original hook bytes. Overwritten instructions are not automatically
-+relocated; reproduce any required original behavior inside the cave.
-+
-+### Type-F reactivation lifecycle fix
-+
-+- Deactivated F0/F1 hooks retain their original-byte snapshot across cheat-file reloads for the current XBE.
-+- Editing a cave value/instruction and reactivating at the same hook reuses the existing external allocation when it fits.
-+- Larger edited caves allocate a new external slot without losing the original hook bytes.
-+- Mutually-exclusive Type-F cheats targeting the same hook can hand off the inactive hook state cleanly.
-+- Hook-install failures now report the exact failed stage instead of only `Type-F Hook Installation Failed`.
-+
-+
-+
-+## v0.1.60 Windows-only compile fix
-+
-+The v0.1.59 Windows-only backport exposed `XemuCheatX86Registers` in a private
-+`CheatEngineWindow` method declaration without declaring that type in
-+`cheat-engine.hh`.  The type already exists in `cheat-engine-memory.h`; v0.1.60
-+adds a C++ forward declaration in `cheat-engine.hh`.  This is compile-only and
-+does not change runtime debugger or Type-F behavior.
-+
-+## v0.1.59 x86 debugger navigation and live register editing
-+
-+The Windows-only v0.1.42 backport now includes browser-style control-flow navigation in the x86
-+Debugger. Select a JMP/Jcc/CALL/RET instruction and press Right to follow its target; Shift+Right
-+follows fall-through, Left goes Back, and Alt+Right goes Forward. These commands only move the
-+disassembly view and never execute the Xbox CPU. The x86 context menu exposes the same actions under
-+`Follow` and `Navigation`. Direct branch/call targets are recognized from disassembly text; while paused,
-+register-indirect targets, common x86 memory-indirect expressions, and RET targets are resolved from
-+the live Current Registers/RAM when possible.
-+
-+Direct JMP/Jcc links are drawn in a small gutter beside the disassembly. Backward/negative links
-+are baby blue and forward/positive links are yellow. The existing double-click behavior remains
-+`Break on Exe`.
-+
-+The left `Current Registers` pane is live and editable whenever the guest is paused or stopped by the
-+debugger. Double-click a value or right-click it and choose `Edit Register Value`; register writes use
-+QEMU's GDB register bridge so WHPX receives the dirty architectural state before Resume/Step. The same
-+right-click menu can copy the register/value or view the value in Memory/x86 Debugger. `PC` remains a
-+derived read-only display; edit `EIP` to change execution position. `Registers at Last Breakpoint`
-+remains a read-only historical snapshot.
-+
-+## v0.1.63 Type-F PDE accessed-bit allocation fix
-+
-+- Fixes repeated F0/F1 activation/allocation failures after the guest has executed the 0x68000000 Type-F mapping.
-+- The IA-32 CPU may set the page-directory Accessed bit; Type-F now validates the PDE page-table base and required mapping flags instead of requiring a byte-for-byte pristine PDE value.
-+- Allocation errors now report whether the guest mapping is unavailable/conflicting versus the 960 KiB code/DD arena actually being exhausted or fragmented.
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index d93cd17..c209e6a 100644
+index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740af4b407e 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
 @@ -47,6 +47,11 @@
@@ -1652,7 +77,7 @@ index d93cd17..c209e6a 100644
  
              /* Try to align the host and virtual clocks
 diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
-index b9ae474..30420ce 100644
+index b9ae474bf855a5afbeb127507490b938a8f2d693..30420ce5b2ce3b835e0a10edc73c394aa46c3dab 100644
 --- a/accel/tcg/cputlb.c
 +++ b/accel/tcg/cputlb.c
 @@ -52,6 +52,7 @@
@@ -1748,22 +173,46 @@ index b9ae474..30420ce 100644
  
  /*
 diff --git a/build.sh b/build.sh
-index 312f36c..35cad5a 100755
+index 312f36c4f56b32f8341c594da9062704df0bb99a..8e3dd6318a7f948072c051889a6dd7ff95a90c47 100755
 --- a/build.sh
 +++ b/build.sh
 @@ -5,6 +5,7 @@ set -o pipefail # Will return the exit status of make if it fails
  set -o physical # Resolve symlinks when changing directory
  
  project_source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-+[[ "${XEMU_DEBUG_TOOLS_BUILD_WRAPPED:-0}" == "1" || ! -f "${project_source_dir}/ui/xui/debug-tools/build-xemu.sh" ]] || exec bash "${project_source_dir}/ui/xui/debug-tools/build-xemu.sh" "$@"
++[[ "${XEMU_DEBUG_TOOLS_BUILD_WRAPPED:-0}" == "1" || ! -f "${project_source_dir}/ui/xui/debug-tools/tools/build-xemu.sh" ]] || exec bash "${project_source_dir}/ui/xui/debug-tools/tools/build-xemu.sh" "$@"
  
  target_arch=$(uname -m)
  
 diff --git a/config_spec.yml b/config_spec.yml
-index c933b54..b58c6f4 100644
+index c933b54daf58f9c49d59665aecc14d662ce682ed..74e5b8b4ac008dc480a32f5fcc1c23858d6e36fd 100644
 --- a/config_spec.yml
 +++ b/config_spec.yml
-@@ -304,6 +304,25 @@ display:
+@@ -7,6 +7,23 @@ general:
+       type: bool
+       default: true
+   screenshot_dir: string
++  video_recording:
++    output_dir: string
++    format:
++      type: integer
++      default: 0
++    fps:
++      type: integer
++      default: 0
++    audio_gain:
++      type: number
++      default: 1.0
++    show_active_codes:
++      type: bool
++      default: false
++    panel_position:
++      type: integer
++      default: 0
+   games_dir: string
+   skip_boot_anim: bool
+   # throttle_io: bool
+@@ -304,6 +321,25 @@ display:
        advanced_tree_state:
          type: bool
          default: false
@@ -1789,8 +238,36 @@ index c933b54..b58c6f4 100644
    setup_nvidia_profile:
      type: bool
      default: true
+@@ -364,6 +400,11 @@ sys:
+     flashrom_path: string
+     eeprom_path: string
+     hdd_path: string
++    hdd_type:
++      type: enum
++      values: [image, folder]
++      default: image
++    hdd_folder_path: string
+     dvd_path: string
+ 
+ perf:
+diff --git a/debian/control b/debian/control
+index 3f58074a74cbbcc865c6d7e21b108d8f9d754208..e9821fa102559f2f30b44c66385d47106bf505bf 100644
+--- a/debian/control
++++ b/debian/control
+@@ -23,6 +23,11 @@ Build-Depends: debhelper (>= 11),
+  libusb-1.0-0-dev,
+  libcurl4-gnutls-dev,
+  libpipewire-0.3-dev,
++ libavcodec-dev,
++ libavformat-dev,
++ libavutil-dev,
++ libswresample-dev,
++ libswscale-dev,
+ Standards-Version: 3.9.8
+ Homepage: https://xemu.app
+ XS-Debian-Vcs-Browser: https://github.com/mborgerson/xemu
 diff --git a/hw/i386/x86-cpu.c b/hw/i386/x86-cpu.c
-index a26055f..b39e06f 100644
+index a26055f5b938c10ceddb8d20b374b621a0a27ff5..b39e06f02abc2fea0ae99a95d4c41a49de7019fd 100644
 --- a/hw/i386/x86-cpu.c
 +++ b/hw/i386/x86-cpu.c
 @@ -30,6 +30,7 @@
@@ -1831,7 +308,7 @@ index a26055f..b39e06f 100644
  
  qemu_irq x86_allocate_cpu_irq(void)
 diff --git a/hw/usb/hcd-ohci.c b/hw/usb/hcd-ohci.c
-index 7b3f120..842f8ce 100644
+index 7b3f120b9c85e9254cf56c74ca0201c9e5e7b1f0..90a72a69282d4c46474187b57b4f29d0853c0852 100644
 --- a/hw/usb/hcd-ohci.c
 +++ b/hw/usb/hcd-ohci.c
 @@ -36,6 +36,10 @@
@@ -1840,76 +317,12 @@ index 7b3f120..842f8ce 100644
  #include "trace.h"
 +#include "../../ui/xui/debug-tools/addons/diagnostics/controller-xid-trace-hook.h"
 +#include "../../ui/xui/debug-tools/addons/diagnostics/guest-input-consumer-trace.h"
-+#include "../../ui/xui/debug-tools/addons/diagnostics/ohci-slow-frame-trace-hook.h"
++#include "../../ui/xui/debug-tools/addons/diagnostics/ohci-slow-frame-profile-hook.h"
 +#include "../../ui/xui/debug-tools/addons/diagnostics/scheduler-trace-hook.h"
  #include "hcd-ohci.h"
  
  /* This causes frames to occur 1000x slower */
-@@ -46,6 +50,63 @@
- static int64_t usb_frame_time;
- static int64_t usb_bit_time;
- 
-+static inline uint64_t ohci_profile_now_ns(void)
-+{
-+    return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-+}
-+
-+static inline void ohci_profile_add_leaf(
-+    XemuDebugToolsOhciSlowFrameEvent *profile,
-+    XemuDebugToolsOhciLeafOperation operation,
-+    XemuDebugToolsOhciListKind list_kind,
-+    uint64_t duration_ns,
-+    uint32_t ed_address,
-+    uint32_t td_address,
-+    int direction,
-+    int pid,
-+    int packet_status,
-+    uint32_t function_address,
-+    uint32_t endpoint,
-+    uint32_t packet_length)
-+{
-+    if (profile == NULL) {
-+        return;
-+    }
-+    if (duration_ns > profile->worst_leaf_ns) {
-+        profile->worst_leaf_ns = duration_ns;
-+        profile->worst_leaf_type = operation;
-+        profile->worst_list_kind = list_kind;
-+        profile->worst_ed_address = ed_address;
-+        profile->worst_td_address = td_address;
-+        profile->worst_direction = direction;
-+        profile->worst_pid = pid;
-+        profile->worst_packet_status = packet_status;
-+        profile->worst_function_address = function_address;
-+        profile->worst_endpoint = endpoint;
-+        profile->worst_packet_length = packet_length;
-+    }
-+}
-+
-+static inline void ohci_profile_finish(
-+    XemuDebugToolsOhciSlowFrameEvent *profile)
-+{
-+    if (profile == NULL) {
-+        return;
-+    }
-+    profile->host_end_ns = ohci_profile_now_ns();
-+    profile->host_duration_ns =
-+        profile->host_end_ns >= profile->host_start_ns
-+            ? profile->host_end_ns - profile->host_start_ns
-+            : 0;
-+    profile->virtual_end_ns =
-+        (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+    profile->virtual_duration_ns =
-+        (int64_t)profile->virtual_end_ns - (int64_t)profile->virtual_start_ns;
-+    if (profile->host_duration_ns >= profile->threshold_ns) {
-+        xemu_debug_tools_ohci_slow_frame_trace_record(profile);
-+    }
-+}
-+
- /* Host Controller Communications Area */
- struct ohci_hcca {
-     uint32_t intr[32];
-@@ -273,7 +334,21 @@ static inline void ohci_intr_update(OHCIState *ohci)
+@@ -273,7 +277,21 @@ static inline void ohci_intr_update(OHCIState *ohci)
  /* Set an interrupt */
  static inline void ohci_set_interrupt(OHCIState *ohci, uint32_t intr)
  {
@@ -1931,7 +344,7 @@ index 7b3f120..842f8ce 100644
      ohci_intr_update(ohci);
  }
  
-@@ -574,8 +649,8 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -574,8 +592,8 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed)
      int pid;
      int ret;
      int i;
@@ -1942,7 +355,7 @@ index 7b3f120..842f8ce 100644
      USBPacket *pkt;
      QEMU_UNINITIALIZED uint8_t buf[8192];
      bool int_req;
-@@ -871,7 +946,10 @@ static void ohci_td_pkt(const char *msg, const uint8_t *buf, size_t len)
+@@ -871,7 +889,10 @@ static void ohci_td_pkt(const char *msg, const uint8_t *buf, size_t len)
   * Service a transport descriptor.
   * Returns nonzero to terminate processing of this endpoint.
   */
@@ -1954,7 +367,7 @@ index 7b3f120..842f8ce 100644
  {
      int dir;
      size_t len = 0, pktlen = 0;
-@@ -879,12 +957,13 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -879,12 +900,13 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
      int pid;
      int ret;
      int i;
@@ -1970,7 +383,7 @@ index 7b3f120..842f8ce 100644
  
      addr = ed->head & OHCI_DPTR_MASK;
      if (addr == 0) {
-@@ -898,11 +977,26 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -898,11 +920,26 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
          trace_usb_ohci_td_skip_async();
          return 1;
      }
@@ -1997,7 +410,7 @@ index 7b3f120..842f8ce 100644
  
      dir = OHCI_BM(ed->flags, ED_D);
      switch (dir) {
-@@ -960,10 +1054,21 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -960,10 +997,21 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
                  pktlen = len;
              }
              if (!completion) {
@@ -2019,7 +432,7 @@ index 7b3f120..842f8ce 100644
              }
          }
      }
-@@ -974,15 +1079,48 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -974,15 +1022,48 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
      ohci_td_pkt("OUT", ohci->usb_buf, pktlen);
  
      if (completion) {
@@ -2068,7 +481,7 @@ index 7b3f120..842f8ce 100644
          if (ohci->async_td) {
              /*
               * ??? The hardware should allow one active packet per
-@@ -996,11 +1134,32 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -996,11 +1077,32 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
          usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr, !flag_r,
                           OHCI_BM(td.flags, TD_DI) == 0);
          usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf, pktlen);
@@ -2101,7 +514,7 @@ index 7b3f120..842f8ce 100644
              ohci->async_td = addr;
              return 1;
          }
-@@ -1013,9 +1172,35 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -1013,9 +1115,35 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
  
      if (ret >= 0) {
          if (dir == OHCI_TD_DIR_IN) {
@@ -2137,7 +550,7 @@ index 7b3f120..842f8ce 100644
              }
              ohci_td_pkt("IN", ohci->usb_buf, pktlen);
          } else {
-@@ -1089,11 +1274,27 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -1089,11 +1217,27 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
          ed->head |= OHCI_ED_H;
      }
  
@@ -2167,7 +580,7 @@ index 7b3f120..842f8ce 100644
      i = OHCI_BM(td.flags, TD_DI);
      if (i < ohci->done_count) {
          ohci->done_count = i;
-@@ -1102,32 +1303,72 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+@@ -1102,32 +1246,72 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
          ohci->done_count = 0;
      }
  exit_no_retire:
@@ -2241,7 +654,7 @@ index 7b3f120..842f8ce 100644
  
          next_ed = ed.next & OHCI_DPTR_MASK;
  
-@@ -1136,10 +1377,20 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
+@@ -1136,10 +1320,20 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
              /* Cancel pending packets for ED that have been paused. */
              addr = ed.head & OHCI_DPTR_MASK;
              if (ohci->async_td && addr == ohci->async_td) {
@@ -2262,7 +675,7 @@ index 7b3f120..842f8ce 100644
              }
              continue;
          }
-@@ -1157,21 +1408,61 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
+@@ -1157,21 +1351,61 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
              active = 1;
  
              if ((ed.flags & OHCI_ED_F) == 0) {
@@ -2325,7 +738,7 @@ index 7b3f120..842f8ce 100644
      }
  
      return active;
-@@ -1191,23 +1482,38 @@ static void ohci_sof(OHCIState *ohci)
+@@ -1191,23 +1425,38 @@ static void ohci_sof(OHCIState *ohci)
  }
  
  /* Process Control and Bulk lists. */
@@ -2367,7 +780,7 @@ index 7b3f120..842f8ce 100644
      }
  }
  
-@@ -1216,33 +1522,72 @@ static void ohci_frame_boundary(void *opaque)
+@@ -1216,33 +1465,72 @@ static void ohci_frame_boundary(void *opaque)
  {
      OHCIState *ohci = opaque;
      struct ohci_hcca hcca;
@@ -2443,7 +856,7 @@ index 7b3f120..842f8ce 100644
      /* Frame boundary, so do EOF stuf here */
      ohci->frt = ohci->fit;
  
-@@ -1270,11 +1615,24 @@ static void ohci_frame_boundary(void *opaque)
+@@ -1270,11 +1558,24 @@ static void ohci_frame_boundary(void *opaque)
      }
      /* Do SOF stuff here */
      ohci_sof(ohci);
@@ -2460,15 +873,15 @@ index 7b3f120..842f8ce 100644
          ohci_die(ohci);
 +        ohci_profile_finish(profile);
 +        return;
-     }
++    }
 +    if (profile) {
 +        profile->hcca_write_ns += ohci_profile_now_ns() - profile_start_ns;
-+    }
+     }
 +    ohci_profile_finish(profile);
  }
  
  /*
-@@ -1490,11 +1848,15 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
+@@ -1490,11 +1791,15 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
      }
  
      if (ohci_port_set_if_connected(ohci, portnum, val & OHCI_PORT_PRS)) {
@@ -2484,7 +897,7 @@ index 7b3f120..842f8ce 100644
      }
  
      /* Invert order here to ensure in ambiguous case, device is powered up. */
-@@ -1504,6 +1866,9 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
+@@ -1504,6 +1809,9 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
      if (val & OHCI_PORT_PPS) {
          ohci_port_power(ohci, portnum, 1);
      }
@@ -2494,7 +907,7 @@ index 7b3f120..842f8ce 100644
      if (old_state != port->ctrl) {
          ohci_set_interrupt(ohci, OHCI_INTR_RHSC);
      }
-@@ -1678,7 +2043,15 @@ static void ohci_mem_write(void *opaque,
+@@ -1678,7 +1986,15 @@ static void ohci_mem_write(void *opaque,
          break;
  
      case 3: /* HcInterruptStatus */
@@ -2511,7 +924,7 @@ index 7b3f120..842f8ce 100644
          ohci_intr_update(ohci);
          break;
  
-@@ -1799,6 +2172,9 @@ static void ohci_attach(USBPort *port1)
+@@ -1799,6 +2115,9 @@ static void ohci_attach(USBPort *port1)
          ohci_set_interrupt(s, OHCI_INTR_RD);
      }
  
@@ -2521,7 +934,7 @@ index 7b3f120..842f8ce 100644
      trace_usb_ohci_port_attach(port1->index);
  
      if (old_state != port->ctrl) {
-@@ -1836,6 +2212,9 @@ static void ohci_detach(USBPort *port1)
+@@ -1836,6 +2155,9 @@ static void ohci_detach(USBPort *port1)
          port->ctrl &= ~OHCI_PORT_PES;
          port->ctrl |= OHCI_PORT_PESC;
      }
@@ -2531,7 +944,7 @@ index 7b3f120..842f8ce 100644
      trace_usb_ohci_port_detach(port1->index);
  
      if (old_state != port->ctrl) {
-@@ -1871,7 +2250,7 @@ static void ohci_async_complete_packet(USBPort *port, USBPacket *packet)
+@@ -1871,7 +2193,7 @@ static void ohci_async_complete_packet(USBPort *port, USBPacket *packet)
  
      trace_usb_ohci_async_complete();
      ohci->async_complete = true;
@@ -2540,8 +953,34 @@ index 7b3f120..842f8ce 100644
  }
  
  static USBPortOps ohci_port_ops = {
+diff --git a/hw/xbox/mcpx/apu/monitor.c b/hw/xbox/mcpx/apu/monitor.c
+index 730fcc9d736d729f4997cb5f64d5ccacc2b062f8..ec2e85b6c5b138cc7f81c65c17a85921417e6455 100644
+--- a/hw/xbox/mcpx/apu/monitor.c
++++ b/hw/xbox/mcpx/apu/monitor.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "apu_int.h"
++#include "ui/xui/debug-tools/addons/Video-Recorder/video-recorder-c.h"
+ 
+ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
+ {
+@@ -73,8 +74,12 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+         return;
+     }
+ 
++    float vu = pow(fmax(0.0, fmin(g_config.audio.volume_limit, 1.0)), M_E);
++    float record_gain = fmax(0.0, fmin(g_config.general.video_recording.audio_gain, 2.0));
++    xemu_video_recorder_submit_audio(&d->monitor.frame_buf[0][0],
++                                     ARRAY_SIZE(d->monitor.frame_buf), record_gain);
++
+     if (d->monitor.stream) {
+-        float vu = pow(fmax(0.0, fmin(g_config.audio.volume_limit, 1.0)), M_E);
+         SDL_SetAudioStreamGain(d->monitor.stream, vu);
+         SDL_PutAudioStreamData(d->monitor.stream, d->monitor.frame_buf,
+                             sizeof(d->monitor.frame_buf));
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
-index 41913d1..c1faaa0 100644
+index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf335c5b48 100644
 --- a/hw/xbox/nv2a/nv2a.c
 +++ b/hw/xbox/nv2a/nv2a.c
 @@ -20,10 +20,14 @@
@@ -2630,7 +1069,7 @@ index 41913d1..c1faaa0 100644
  }
  
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index e0cab2d..0071320 100644
+index e0cab2d09524f7b3d83fc66c5b4c378ef5150082..00713206fa23356b2af7f99d8bff043f8cad7cc1 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
 @@ -20,6 +20,7 @@
@@ -2698,7 +1137,7 @@ index e0cab2d..0071320 100644
      } else {
          assert(!"Unrecognized pfifo puller method");
 diff --git a/hw/xbox/nv2a/pgraph/gl/draw.c b/hw/xbox/nv2a/pgraph/gl/draw.c
-index c569341..bfd1332 100644
+index c56934187ee7934d6c4f2f37dccffa97c8523183..bfd133284adc0c78afe9aa8b2f50c5f67f57675a 100644
 --- a/hw/xbox/nv2a/pgraph/gl/draw.c
 +++ b/hw/xbox/nv2a/pgraph/gl/draw.c
 @@ -23,6 +23,7 @@
@@ -2897,7 +1336,7 @@ index c569341..bfd1332 100644
          NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
          NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");
 diff --git a/hw/xbox/nv2a/pgraph/gl/renderer.c b/hw/xbox/nv2a/pgraph/gl/renderer.c
-index 9964ce8..54da4ed 100644
+index 9964ce8585761f2d1f9f9fa98908ad91d4a693d6..54da4edb0864b314a847bafbb8d8d194f91d52fd 100644
 --- a/hw/xbox/nv2a/pgraph/gl/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/gl/renderer.c
 @@ -128,7 +128,7 @@ static void pgraph_gl_process_pending(NV2AState *d)
@@ -2919,7 +1358,7 @@ index 9964ce8..54da4ed 100644
      }
  }
 diff --git a/hw/xbox/nv2a/pgraph/gl/surface.c b/hw/xbox/nv2a/pgraph/gl/surface.c
-index 714121e..018452e 100644
+index 714121e6bd2f9dd1f6dfbbf3e613e7f7423a5886..018452e5d364dcba11d6c8593914825e20707cae 100644
 --- a/hw/xbox/nv2a/pgraph/gl/surface.c
 +++ b/hw/xbox/nv2a/pgraph/gl/surface.c
 @@ -43,19 +43,19 @@ void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -2965,7 +1404,7 @@ index 714121e..018452e 100644
      if (wait_for_downloads) {
          qemu_mutex_lock(&d->pfifo.lock);
 diff --git a/hw/xbox/nv2a/pgraph/null/renderer.c b/hw/xbox/nv2a/pgraph/null/renderer.c
-index e14fecd..feb0324 100644
+index e14fecdfaf869cd0b39cb4dc6a9e02134f583962..feb03247625d99965691e753403f780df7a6bfc8 100644
 --- a/hw/xbox/nv2a/pgraph/null/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/null/renderer.c
 @@ -42,14 +42,14 @@ static void pgraph_null_process_pending(NV2AState *d)
@@ -2986,7 +1425,7 @@ index e14fecd..feb0324 100644
      }
  }
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 348ce3e..8314b8a 100644
+index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84669a5604 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
 @@ -1,3 +1,5 @@
@@ -3306,7 +1745,7 @@ index 348ce3e..8314b8a 100644
  
          pg->renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_IDLE;
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.h b/hw/xbox/nv2a/pgraph/pgraph.h
-index 6a1fcf0..025684c 100644
+index 6a1fcf09ed60c6054fcd14340159c07f720efd08..025684c0a6a3fbef8408ca0b47bc729bb3afe308 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.h
 +++ b/hw/xbox/nv2a/pgraph/pgraph.h
 @@ -28,6 +28,7 @@
@@ -3344,7 +1783,7 @@ index 6a1fcf0..025684c 100644
  {
      qemu_mutex_lock(&pg->cpu_mmio_access_lock);
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
-index d78087e..a327bab 100644
+index d78087e56bfb2c8e8c62dfc36389fb7de4741a5b..a327bab4079b09152d6467c5d0b7bd1fb328b437 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
 @@ -19,6 +19,8 @@
@@ -3387,7 +1826,7 @@ index d78087e..a327bab 100644
  
  void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index 6be90ba..c43276a 100644
+index 6be90bad65e22e0a087380ff3f01a326a3e7b386..c43276a0458b674089f0e01dafd17855742ec78f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
 @@ -124,7 +124,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
@@ -3409,7 +1848,7 @@ index 6be90ba..c43276a 100644
      }
  }
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index 9d438f2..8fb0f9f 100644
+index 9d438f2d7b209d9f494dba09c6e55d44cdf2e55b..8fb0f9f9c9ac6bf672278013e43041928c6b3a02 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
 @@ -41,19 +41,19 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -3455,7 +1894,7 @@ index 9d438f2..8fb0f9f 100644
      if (wait_for_downloads) {
          qemu_mutex_lock(&d->pfifo.lock);
 diff --git a/hw/xbox/nv2a/ptimer.c b/hw/xbox/nv2a/ptimer.c
-index 7dfa534..9d36580 100644
+index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f56c3d485 100644
 --- a/hw/xbox/nv2a/ptimer.c
 +++ b/hw/xbox/nv2a/ptimer.c
 @@ -21,6 +21,11 @@
@@ -3661,7 +2100,7 @@ index 7dfa534..9d36580 100644
      default:
          break;
 diff --git a/hw/xbox/xbox_pci.c b/hw/xbox/xbox_pci.c
-index 2a01e13..6c2209b 100644
+index 2a01e13dfee9d07b4f429cd6da98760e89325c00..6c2209bebec999ccdc070fe80652542dde58c3e2 100644
 --- a/hw/xbox/xbox_pci.c
 +++ b/hw/xbox/xbox_pci.c
 @@ -43,6 +43,7 @@
@@ -3682,7 +2121,7 @@ index 2a01e13..6c2209b 100644
  }
  
 diff --git a/hw/xbox/xid-gamepad.c b/hw/xbox/xid-gamepad.c
-index 43d0d0e..0c49d89 100644
+index 43d0d0ef5650ce0642bdb74bfaa73e8a3ea2e229..0c49d899664296b7ad9042077cec40ab92365e4b 100644
 --- a/hw/xbox/xid-gamepad.c
 +++ b/hw/xbox/xid-gamepad.c
 @@ -20,6 +20,8 @@
@@ -3766,7 +2205,7 @@ index 43d0d0e..0c49d89 100644
  
  static const Property xid_properties[] = {
 diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
-index 3f6c751..40c9f95 100644
+index 3f6c751e24e61f059c93be8268bfaed04ad7650b..40c9f95b3bd0d365a35223aff9a983413154670c 100644
 --- a/hw/xbox/xid.c
 +++ b/hw/xbox/xid.c
 @@ -20,6 +20,8 @@
@@ -3884,7 +2323,7 @@ index 3f6c751..40c9f95 100644
 +        s->device_index, s, 0, 0);
  }
 diff --git a/include/qemu/main-loop.h b/include/qemu/main-loop.h
-index 80ab109..2729bd2 100644
+index 80ab1098f6ceff7dfeeb843d920734737ad74fe9..2729bd272475447d1ac70606d3c82289e9cfd78a 100644
 --- a/include/qemu/main-loop.h
 +++ b/include/qemu/main-loop.h
 @@ -451,8 +451,10 @@ void main_loop_poll_remove_notifier(Notifier *notify);
@@ -3900,7 +2339,7 @@ index 80ab109..2729bd2 100644
  
  #endif
 diff --git a/include/qemu/timer.h b/include/qemu/timer.h
-index 83fba24..67f4590 100644
+index 83fba24f0f735f87b062bbece3a20c0e3560dcd1..4dc064b8d66a556f978b1ffaefc1211289ec7331 100644
 --- a/include/qemu/timer.h
 +++ b/include/qemu/timer.h
 @@ -89,6 +89,11 @@ struct QEMUTimer {
@@ -3915,112 +2354,44 @@ index 83fba24..67f4590 100644
  };
  
  extern QEMUTimerListGroup main_loop_tlg;
-@@ -602,6 +607,92 @@ static inline QEMUTimer *timer_new_ms(QEMUClockType type, QEMUTimerCB *cb,
+@@ -602,6 +607,8 @@ static inline QEMUTimer *timer_new_ms(QEMUClockType type, QEMUTimerCB *cb,
      return timer_new(type, SCALE_MS, cb, opaque);
  }
  
-+/* Info: Capture callback source identity without changing timer behavior. */
-+static inline void xemu_timer_debug_set_callback_source(
-+    QEMUTimer *ts, const char *cb_name, const char *source_file, int source_line)
-+{
-+    if (ts) {
-+        ts->xemu_debug_cb_name = cb_name;
-+        ts->xemu_debug_cb_file = source_file;
-+        ts->xemu_debug_cb_line = source_line;
-+    }
-+}
-+
-+static inline void xemu_timer_init_ns_debug(
-+    QEMUTimer *ts, QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    timer_init_ns(ts, type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+}
-+
-+static inline void xemu_timer_init_us_debug(
-+    QEMUTimer *ts, QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    timer_init_us(ts, type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+}
-+
-+static inline void xemu_timer_init_ms_debug(
-+    QEMUTimer *ts, QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    timer_init_ms(ts, type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+}
-+
-+static inline QEMUTimer *xemu_timer_new_debug(
-+    QEMUClockType type, int scale, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    QEMUTimer *ts = timer_new(type, scale, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+    return ts;
-+}
-+
-+static inline QEMUTimer *xemu_timer_new_ns_debug(
-+    QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    QEMUTimer *ts = timer_new_ns(type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+    return ts;
-+}
-+
-+static inline QEMUTimer *xemu_timer_new_us_debug(
-+    QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    QEMUTimer *ts = timer_new_us(type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+    return ts;
-+}
-+
-+static inline QEMUTimer *xemu_timer_new_ms_debug(
-+    QEMUClockType type, QEMUTimerCB *cb, void *opaque,
-+    const char *cb_name, const char *source_file, int source_line)
-+{
-+    QEMUTimer *ts = timer_new_ms(type, cb, opaque);
-+    xemu_timer_debug_set_callback_source(ts, cb_name, source_file, source_line);
-+    return ts;
-+}
-+
-+#define timer_init_ns(ts, type, cb, opaque) \
-+    xemu_timer_init_ns_debug((ts), (type), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_init_us(ts, type, cb, opaque) \
-+    xemu_timer_init_us_debug((ts), (type), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_init_ms(ts, type, cb, opaque) \
-+    xemu_timer_init_ms_debug((ts), (type), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_new(type, scale, cb, opaque) \
-+    xemu_timer_new_debug((type), (scale), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_new_ns(type, cb, opaque) \
-+    xemu_timer_new_ns_debug((type), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_new_us(type, cb, opaque) \
-+    xemu_timer_new_us_debug((type), (cb), (opaque), #cb, __FILE__, __LINE__)
-+#define timer_new_ms(type, cb, opaque) \
-+    xemu_timer_new_ms_debug((type), (cb), (opaque), #cb, __FILE__, __LINE__)
++#include "../../ui/xui/debug-tools/addons/diagnostics/qemu-timer-source-hook.h"
 +
  /**
   * timer_deinit:
   * @ts: the timer to be de-initialised
 diff --git a/system/cpus.c b/system/cpus.c
-index ef2d2f2..c227d8c 100644
+index ef2d2f241faaa5d9da7b61caf04b5b0669e13bf3..d1ebbebef9b1b2e83ff5345c2ccb4126c98f0487 100644
 --- a/system/cpus.c
 +++ b/system/cpus.c
-@@ -47,6 +47,7 @@
+@@ -47,6 +47,8 @@
  #include "hw/boards.h"
  #include "hw/hw.h"
  #include "trace.h"
 +#include "../ui/xui/debug-tools/addons/diagnostics/bql-trace-hook.h"
++#include "../ui/xui/debug-tools/addons/memory-tools/exact-execution-trace.h"
  
  #ifdef CONFIG_LINUX
  
-@@ -575,14 +576,18 @@ void bql_lock_impl(const char *file, int line)
+@@ -341,6 +343,14 @@ bool cpu_can_run(CPUState *cpu)
+ 
+ void cpu_handle_guest_debug(CPUState *cpu)
+ {
++    /* Memory Tools exact tracing owns continuous single-step debug exits on
++     * generic accelerators. User breakpoints/watchpoints are deliberately not
++     * consumed by the addon and continue through the normal QEMU debugger
++     * stop path below. */
++    if (xemu_memory_tools_exact_trace_handle_guest_debug(cpu)) {
++        return;
++    }
++
+     if (replay_running_debug()) {
+         if (!cpu->singlestep_enabled) {
+             /*
+@@ -575,14 +585,18 @@ void bql_lock_impl(const char *file, int line)
      QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
  
      g_assert(!bql_locked());
@@ -4039,8 +2410,78 @@ index ef2d2f2..c227d8c 100644
  }
  
  void qemu_cond_wait_bql(QemuCond *cond)
+diff --git a/system/vl.c b/system/vl.c
+index f45bdc34586ad88f7c4c75025b69329e0de7ddf6..f757204e0c9f8600d2f669ab50ef1291378d04b6 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -38,6 +38,7 @@
+ #include "qobject/qjson.h"
+ #include "qemu-version.h"
+ #include "qemu/cutils.h"
++#include "ui/xui/debug-tools/addons/Folder-HDD/folder-hdd.h"
+ #include "qemu/help_option.h"
+ #include "qemu/hw-version.h"
+ #include "qemu/uuid.h"
+@@ -3057,19 +3058,46 @@ void qemu_init(int argc, char **argv)
+     fake_argv[fake_argc++] = strdup("-m");
+     fake_argv[fake_argc++] = g_strdup_printf("%d", mem);
+ 
+-    const char *hdd_path = g_config.sys.files.hdd_path;
+-    if (strlen(hdd_path) > 0) {
+-        if (xemu_check_file(hdd_path)) {
+-            char *msg = g_strdup_printf("Failed to open hard disk image file '%s'. Please check machine settings.", hdd_path);
+-            xemu_queue_error_message(msg);
+-            g_free(msg);
++    if ((int)g_config.sys.files.hdd_type == CONFIG_SYS_FILES_HDD_TYPE_FOLDER) {
++        const char *folder_root = g_config.sys.files.hdd_folder_path;
++        char *folder_error = NULL;
++        if (!cmp_folder_hdd_root_is_usable(folder_root, &folder_error)) {
++            const char *message = folder_error ? folder_error :
++                "Folder-HDD root is not usable. Please check machine settings.";
++            if (folder_root && folder_root[0] &&
++                !g_file_test(folder_root, G_FILE_TEST_EXISTS)) {
++                xemu_queue_error_message_with_action(
++                    message, "Make Folders", cmp_folder_hdd_make_folders_action,
++                    (void *)folder_root);
++            } else {
++                xemu_queue_error_message(message);
++            }
++            g_free(folder_error);
++            autostart = 0;
+         } else {
++            char *folder_uri = cmp_folder_hdd_make_uri(folder_root);
++            char *escaped_folder_uri = strdup_double_commas(folder_uri);
+             fake_argv[fake_argc++] = strdup("-drive");
+-            char *escaped_hdd_path = strdup_double_commas(hdd_path);
+-            fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s",
+-                escaped_hdd_path,
+-                strlen(escaped_hdd_path) > 0 ? ",locked=on" : "");
+-            free(escaped_hdd_path);
++            fake_argv[fake_argc++] = g_strdup_printf(
++                "index=0,media=disk,file=%s,locked=on", escaped_folder_uri);
++            free(escaped_folder_uri);
++            g_free(folder_uri);
++        }
++    } else {
++        const char *hdd_path = g_config.sys.files.hdd_path;
++        if (strlen(hdd_path) > 0) {
++            if (xemu_check_file(hdd_path)) {
++                char *msg = g_strdup_printf("Failed to open hard disk image file '%s'. Please check machine settings.", hdd_path);
++                xemu_queue_error_message(msg);
++                g_free(msg);
++            } else {
++                fake_argv[fake_argc++] = strdup("-drive");
++                char *escaped_hdd_path = strdup_double_commas(hdd_path);
++                fake_argv[fake_argc++] = g_strdup_printf("index=0,media=disk,file=%s%s",
++                    escaped_hdd_path,
++                    strlen(escaped_hdd_path) > 0 ? ",locked=on" : "");
++                free(escaped_hdd_path);
++            }
+         }
+     }
+ 
 diff --git a/target/i386/tcg/system/seg_helper.c b/target/i386/tcg/system/seg_helper.c
-index 8c7856b..3fc05b8 100644
+index 8c7856be81e24ef5f15ed45ee269969e5713149c..3fc05b877fc73344833ff8a7dbcd508ccb895323 100644
 --- a/target/i386/tcg/system/seg_helper.c
 +++ b/target/i386/tcg/system/seg_helper.c
 @@ -26,6 +26,7 @@
@@ -4061,7 +2502,7 @@ index 8c7856b..3fc05b8 100644
                        "Servicing hardware INT=0x%02x\n", intno);
          do_interrupt_x86_hardirq(env, intno, 1);
 diff --git a/target/i386/whpx/whpx-accel-ops.c b/target/i386/whpx/whpx-accel-ops.c
-index f758861..794e72e 100644
+index f75886128d0d35f057593eb0ca11224751d5976b..794e72eb03929f5f7a9245e7a687815756c26311 100644
 --- a/target/i386/whpx/whpx-accel-ops.c
 +++ b/target/i386/whpx/whpx-accel-ops.c
 @@ -14,10 +14,10 @@
@@ -4087,7 +2528,7 @@ index f758861..794e72e 100644
  
  static const TypeInfo whpx_accel_ops_type = {
 diff --git a/target/i386/whpx/whpx-all.c b/target/i386/whpx/whpx-all.c
-index 6bf8d5f..573d91b 100644
+index 6bf8d5f4bbbc30039905e63f22255838673d629f..573d91b8ca0467df50e317485e3ad2e395add0fd 100644
 --- a/target/i386/whpx/whpx-all.c
 +++ b/target/i386/whpx/whpx-all.c
 @@ -32,6 +32,7 @@
@@ -4171,7 +2612,7 @@ index 6bf8d5f..573d91b 100644
  
  /*
 diff --git a/ui/xemu-input.c b/ui/xemu-input.c
-index 87f6d1e..1e0b652 100644
+index af7ce780a2d3fd61283ce5a30a24e1064761c4d5..9414fb38610ae629d81c854ef078f38cb3f78440 100644
 --- a/ui/xemu-input.c
 +++ b/ui/xemu-input.c
 @@ -31,6 +31,8 @@
@@ -4183,15 +2624,7 @@ index 87f6d1e..1e0b652 100644
  #include <stdio.h>
  #include <stdlib.h>
  
-@@ -277,6 +279,7 @@ void xemu_input_init(void)
-     new_con->type = INPUT_DEVICE_SDL_KEYBOARD;
-     new_con->name = "Keyboard";
-     new_con->bound = -1;
-+    new_con->connected = true;
-     new_con->peripheral_types[0] = PERIPHERAL_NONE;
-     new_con->peripheral_types[1] = PERIPHERAL_NONE;
-     new_con->peripherals[0] = NULL;
-@@ -350,34 +353,88 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+@@ -362,12 +364,18 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
  {
      if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
          DPRINTF("Controller Added: %d\n", event->gdevice.which);
@@ -4210,87 +2643,29 @@ index 87f6d1e..1e0b652 100644
              return;
          }
  
--        // Success! Create a new node to track this controller and continue init
--        ControllerState *new_con = malloc(sizeof(ControllerState));
-+        SDL_Joystick *sdl_joystick = SDL_GetGamepadJoystick(sdl_con);
-+        SDL_JoystickID sdl_joystick_id = SDL_GetJoystickID(sdl_joystick);
-+        SDL_GUID sdl_joystick_guid = SDL_GetJoystickGUID(sdl_joystick);
-+        const char *sdl_name = SDL_GetGamepadName(sdl_con);
-+        char guid_buf[35] = { 0 };
-+        SDL_GUIDToString(sdl_joystick_guid, guid_buf, sizeof(guid_buf));
-+        DPRINTF("Opened %s (%s)\n", sdl_name, guid_buf);
+@@ -378,6 +386,9 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+         char guid_buf[35] = { 0 };
+         SDL_GUIDToString(sdl_joystick_guid, guid_buf, sizeof(guid_buf));
+         DPRINTF("Opened %s (%s)\n", sdl_name, guid_buf);
 +        xemu_debug_tools_controller_xid_trace_host_lifecycle(
 +            XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_OPENED, -1,
 +            sdl_joystick_id, 0, sdl_name, guid_buf);
-+
-+        /* Info: Reconnect the same host GUID without guest XID re-enumeration. */
-+        ControllerState *new_con = NULL;
-+        ControllerState *iter;
-+        QTAILQ_FOREACH(iter, &available_controllers, entry) {
-+            if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || iter->connected ||
-+                iter->bound < 0) {
-+                continue;
-+            }
-+            if (memcmp(&iter->sdl_joystick_guid, &sdl_joystick_guid,
-+                       sizeof(SDL_GUID)) == 0) {
-+                new_con = iter;
-+                break;
-+            }
-+        }
-+
-+        if (new_con != NULL) {
-+            new_con->name = sdl_name;
-+            new_con->sdl_gamepad = sdl_con;
-+            new_con->sdl_joystick = sdl_joystick;
-+            new_con->sdl_joystick_id = sdl_joystick_id;
-+            new_con->sdl_joystick_guid = sdl_joystick_guid;
-+            new_con->connected = true;
-+            new_con->last_input_updated_ts = 0;
-+            new_con->last_rumble_updated_ts = 0;
-+            new_con->buttons = 0;
-+            memset(new_con->axis, 0, sizeof(new_con->axis));
-+            xemu_input_bindings_reload_map(new_con);
-+
+ 
+         /* Info: Reconnect the same host GUID without guest XID re-enumeration. */
+         ControllerState *new_con = NULL;
+@@ -407,6 +418,11 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+             memset(new_con->axis, 0, sizeof(new_con->axis));
+             xemu_input_bindings_reload_map(new_con);
+ 
 +            xemu_debug_tools_controller_xid_trace_host_lifecycle(
 +                XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_PERSISTENT_REATTACHED,
 +                new_con->bound, new_con->sdl_joystick_id, 0,
 +                new_con->name, guid_buf);
 +
-+            char buf[128];
-+            snprintf(buf, sizeof(buf), "Reconnected '%s' to port %d",
-+                     new_con->name, new_con->bound + 1);
-+            xemu_queue_notification(buf);
-+            return;
-+        }
-+
-+        // Success! Create a new node to track this controller and continue init.
-+        new_con = malloc(sizeof(ControllerState));
-         memset(new_con, 0, sizeof(ControllerState));
-         new_con->type                 = INPUT_DEVICE_SDL_GAMEPAD;
--        new_con->name                 = SDL_GetGamepadName(sdl_con);
-+        new_con->name                 = sdl_name;
-         new_con->sdl_gamepad          = sdl_con;
--        new_con->sdl_joystick         = SDL_GetGamepadJoystick(new_con->sdl_gamepad);
--        new_con->sdl_joystick_id      = SDL_GetJoystickID(new_con->sdl_joystick);
--        new_con->sdl_joystick_guid    = SDL_GetJoystickGUID(new_con->sdl_joystick);
-+        new_con->sdl_joystick         = sdl_joystick;
-+        new_con->sdl_joystick_id      = sdl_joystick_id;
-+        new_con->sdl_joystick_guid    = sdl_joystick_guid;
-         new_con->bound                = -1;
-+        new_con->connected            = true;
-         new_con->peripheral_types[0] = PERIPHERAL_NONE;
-         new_con->peripheral_types[1] = PERIPHERAL_NONE;
-         new_con->peripherals[0] = NULL;
-         new_con->peripherals[1] = NULL;
- 
--        char guid_buf[35] = { 0 };
--        SDL_GUIDToString(new_con->sdl_joystick_guid, guid_buf, sizeof(guid_buf));
--        DPRINTF("Opened %s (%s)\n", new_con->name, guid_buf);
--
-         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
-         xemu_input_bindings_reload_map(new_con);
- 
-@@ -437,33 +494,57 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+             char buf[128];
+             snprintf(buf, sizeof(buf), "Reconnected '%s' to port %d",
+                      new_con->name, new_con->bound + 1);
+@@ -489,7 +505,13 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
              if (iter->type != INPUT_DEVICE_SDL_GAMEPAD) continue;
  
              if (iter->sdl_joystick_id == event->gdevice.which) {
@@ -4302,25 +2677,12 @@ index 87f6d1e..1e0b652 100644
 +                    XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_REMOVED,
 +                    iter->bound, iter->sdl_joystick_id, 0, iter->name, trace_guid);
  
--                // Disconnect
                  if (iter->bound >= 0) {
--                    // Queue a notification to inform user controller disconnected
--                    // FIXME: Probably replace with a callback registration thing,
--                    // but this works well enough for now.
-+                    /* Info: Keep the guest XID device present with neutral input while host hardware is absent. */
-                     char buf[128];
--                    snprintf(buf, sizeof(buf), "Port %d disconnected", iter->bound+1);
-+                    snprintf(buf, sizeof(buf), "Port %d controller disconnected; guest controller retained",
-+                             iter->bound + 1);
-                     xemu_queue_notification(buf);
- 
--                    // Unbind the controller, but don't save the unbinding in
--                    // case the controller is reconnected
--                    xemu_input_bind(iter->bound, NULL, 0);
-+                    iter->buttons = 0;
-+                    memset(iter->axis, 0, sizeof(iter->axis));
-+                    iter->rumble_l = 0;
-+                    iter->rumble_r = 0;
+                     /* Info: Keep the guest XID device present with neutral input while host hardware is absent. */
+@@ -502,6 +524,14 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+                     memset(iter->axis, 0, sizeof(iter->axis));
+                     iter->rumble_l = 0;
+                     iter->rumble_r = 0;
 +                    xemu_debug_tools_controller_xid_trace_host_state(
 +                        iter->bound, iter->sdl_joystick_id,
 +                        iter->buttons, iter->axis);
@@ -4329,57 +2691,10 @@ index 87f6d1e..1e0b652 100644
 +                        iter->bound, iter->sdl_joystick_id, 0,
 +                        iter->name, trace_guid);
 +
-+                    if (iter->sdl_gamepad) {
-+                        SDL_RumbleGamepad(iter->sdl_gamepad, 0, 0, 0);
-+                        SDL_CloseGamepad(iter->sdl_gamepad);
-+                    }
-+                    iter->name = "Disconnected Controller";
-+                    iter->sdl_gamepad = NULL;
-+                    iter->sdl_joystick = NULL;
-+                    iter->connected = false;
-+                    iter->last_input_updated_ts = 0;
-+                    iter->last_rumble_updated_ts = 0;
-+
-+                    handled = 1;
-+                    break;
-                 }
- 
--                // Unlink
-+                // Unbound host devices have no guest XID to preserve.
-                 QTAILQ_REMOVE(&available_controllers, iter, entry);
--
--                // Deallocate
-                 if (iter->sdl_gamepad) {
-                     SDL_CloseGamepad(iter->sdl_gamepad);
-                 }
--
-                 for (int i = 0; i < 2; i++) {
--                    if (iter->peripherals[i])
-+                    if (iter->peripherals[i]) {
-                         g_free(iter->peripherals[i]);
-+                    }
-                 }
-                 free(iter);
- 
-@@ -556,7 +637,7 @@ XemuInputHostPollBatch *xemu_input_host_poll_prepare(void)
-     ControllerState *iter;
- 
-     QTAILQ_FOREACH(iter, &available_controllers, entry) {
--        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
-             iter->sdl_gamepad == NULL || iter->controller_map == NULL) {
-             continue;
-         }
-@@ -573,7 +654,7 @@ XemuInputHostPollBatch *xemu_input_host_poll_prepare(void)
- 
-     size_t index = 0;
-     QTAILQ_FOREACH(iter, &available_controllers, entry) {
--        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
-             iter->sdl_gamepad == NULL || iter->controller_map == NULL) {
-             continue;
-         }
-@@ -592,6 +673,62 @@ XemuInputHostPollBatch *xemu_input_host_poll_prepare(void)
+                     if (iter->sdl_gamepad) {
+                         SDL_RumbleGamepad(iter->sdl_gamepad, 0, 0, 0);
+                         SDL_CloseGamepad(iter->sdl_gamepad);
+@@ -668,6 +698,62 @@ XemuInputHostPollBatch *xemu_input_host_poll_prepare(void)
      return batch;
  }
  
@@ -4442,7 +2757,7 @@ index 87f6d1e..1e0b652 100644
  void xemu_input_host_poll_sample(XemuInputHostPollBatch *batch)
  {
      if (batch == NULL) {
-@@ -603,16 +740,22 @@ void xemu_input_host_poll_sample(XemuInputHostPollBatch *batch)
+@@ -679,16 +765,22 @@ void xemu_input_host_poll_sample(XemuInputHostPollBatch *batch)
          uint16_t buttons = 0;
          int16_t axis[CONTROLLER_AXIS__COUNT] = { 0 };
  
@@ -4469,16 +2784,7 @@ index 87f6d1e..1e0b652 100644
          }
  
          for (int axis_index = CONTROLLER_AXIS_LSTICK_X;
-@@ -637,7 +780,7 @@ static ControllerState *xemu_input_host_poll_find_live_state(
-         if (iter != entry->state) {
-             continue;
-         }
--        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
-             iter->sdl_gamepad != entry->sdl_gamepad ||
-             iter->sdl_joystick_id != entry->sdl_joystick_id) {
-             return NULL;
-@@ -667,6 +810,8 @@ void xemu_input_host_poll_commit(XemuInputHostPollBatch *batch)
+@@ -743,6 +835,8 @@ void xemu_input_host_poll_commit(XemuInputHostPollBatch *batch)
          state->buttons = entry->buttons;
          memcpy(state->axis, entry->axis, sizeof(state->axis));
          state->last_input_updated_ts = entry->sampled_ts;
@@ -4487,7 +2793,7 @@ index 87f6d1e..1e0b652 100644
      }
  }
  
-@@ -677,16 +822,41 @@ void xemu_input_host_poll_free(XemuInputHostPollBatch *batch)
+@@ -753,16 +847,41 @@ void xemu_input_host_poll_free(XemuInputHostPollBatch *batch)
  
  void xemu_input_update_controller(ControllerState *state)
  {
@@ -4529,19 +2835,7 @@ index 87f6d1e..1e0b652 100644
      if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
          xemu_input_update_sdl_kbd_controller_state(state);
      }
-@@ -698,7 +868,10 @@ void xemu_input_update_controllers(void)
- {
-     ControllerState *iter;
-     QTAILQ_FOREACH(iter, &available_controllers, entry) {
--        xemu_input_update_controller(iter);
-+        /* Info: SDL gamepads use cached host-poll state; keyboard refresh remains local. */
-+        if (iter->type == INPUT_DEVICE_SDL_KEYBOARD) {
-+            xemu_input_update_controller(iter);
-+        }
-     }
-     QTAILQ_FOREACH(iter, &available_controllers, entry) {
-         xemu_input_update_rumble(iter);
-@@ -788,7 +961,18 @@ void xemu_input_bind(int index, ControllerState *state, int save)
+@@ -867,7 +986,18 @@ void xemu_input_bind(int index, ControllerState *state, int save)
  
      // Unbind existing controller
      if (bound_controllers[index]) {
@@ -4561,7 +2855,7 @@ index 87f6d1e..1e0b652 100644
          Error *err = NULL;
  
          // Unbind any XMUs
-@@ -881,6 +1065,17 @@ void xemu_input_bind(int index, ControllerState *state, int save)
+@@ -960,6 +1090,17 @@ void xemu_input_bind(int index, ControllerState *state, int save)
          object_unref(OBJECT(dev));
  
          state->device = usbhub_dev;
@@ -4579,23 +2873,31 @@ index 87f6d1e..1e0b652 100644
      }
  }
  
-diff --git a/ui/xemu-input.h b/ui/xemu-input.h
-index 9b66ea4..294b5a7 100644
---- a/ui/xemu-input.h
-+++ b/ui/xemu-input.h
-@@ -103,6 +103,7 @@ typedef struct ControllerState {
-     SDL_Joystick       *sdl_joystick;
-     SDL_JoystickID      sdl_joystick_id;
-     SDL_GUID            sdl_joystick_guid;
-+    bool                connected; // Host device present; guest XID may persist while false.
+diff --git a/ui/xemu-notifications.h b/ui/xemu-notifications.h
+index f023eb350a9c26b4aa71f1988cbd6c185529591d..80c45e141dce2b616e83fc0dc78f880423a1759a 100644
+--- a/ui/xemu-notifications.h
++++ b/ui/xemu-notifications.h
+@@ -27,9 +27,15 @@
+ extern "C" {
+ #endif
  
-     enum peripheral_type peripheral_types[2];
-     void *peripherals[2];
++typedef void (*XemuNotificationAction)(void *opaque);
++
+ // Simple API to show a message on the screen when some event happens
+ void xemu_queue_notification(const char *msg);
+ void xemu_queue_error_message(const char *msg);
++void xemu_queue_error_message_with_action(const char *msg,
++                                          const char *action_label,
++                                          XemuNotificationAction action,
++                                          void *opaque);
+ 
+ #ifdef __cplusplus
+ }
 diff --git a/ui/xemu.c b/ui/xemu.c
-index 49058ee..2e6dc93 100644
+index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c256ae059 100644
 --- a/ui/xemu.c
 +++ b/ui/xemu.c
-@@ -43,6 +43,7 @@
+@@ -43,11 +43,13 @@
  #include "system/runstate-action.h"
  #include "system/system.h"
  #include "xui/xemu-hud.h"
@@ -4603,7 +2905,45 @@ index 49058ee..2e6dc93 100644
  #include "xemu-input.h"
  #include "xemu-settings.h"
  #include "xemu-snapshots.h"
-@@ -767,6 +768,8 @@ static void *vblank_timer_thread(void *opaque)
+ #include "xemu-version.h"
+ #include "xemu-os-utils.h"
++#include "xui/debug-tools/addons/Video-Recorder/video-recorder-c.h"
+ 
+ #include "data/xemu_64x64.png.h"
+ 
+@@ -360,11 +362,19 @@ static void process_key(struct xemu_console *scon, SDL_KeyboardEvent *ev)
+     qkbd_state_key_event(scon->kbd, qcode, ev->type == SDL_EVENT_KEY_DOWN);
+ }
+ 
++static bool video_record_hotkey_held;
++
+ static void handle_keydown(SDL_Event *ev)
+ {
+     int win;
+     struct xemu_console *scon = get_scon_from_window(ev->key.windowID);
+     if (scon == NULL) return;
++    if (!scon->ignore_hotkeys && !ev->key.repeat &&
++        ev->key.scancode == SDL_SCANCODE_F9) {
++        video_record_hotkey_held = true;
++        xemu_video_recorder_toggle();
++        return;
++    }
+     int gui_key_modifier_pressed = get_mod_state();
+     int gui_keysym = 0;
+ 
+@@ -425,6 +435,11 @@ static void handle_keyup(SDL_Event *ev)
+     struct xemu_console *scon = get_scon_from_window(ev->key.windowID);
+     if (!scon) return;
+ 
++    if (ev->key.scancode == SDL_SCANCODE_F9 && video_record_hotkey_held) {
++        video_record_hotkey_held = false;
++        return;
++    }
++
+     scon->ignore_hotkeys = false;
+     process_key(scon, &ev->key);
+ }
+@@ -793,6 +808,8 @@ static void *vblank_timer_thread(void *opaque)
          }
  
          if (!qatomic_read(&qemu_exiting)) {
@@ -4612,7 +2952,7 @@ index 49058ee..2e6dc93 100644
              bql_lock();
              process_vblank(scon);
              bql_unlock();
-@@ -800,7 +803,7 @@ static void report_stats(void)
+@@ -826,7 +843,7 @@ static void report_stats(void)
   * Renders the main interface. Usually called from the main thread,
   * but may sometimes be called from another thread.
   */
@@ -4621,7 +2961,7 @@ index 49058ee..2e6dc93 100644
  {
      static bool rendering;
      if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
-@@ -827,6 +830,8 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -853,6 +870,8 @@ static void gl_render_frame(struct xemu_console *scon)
      assert(glGetError() == GL_NO_ERROR);
  
      if (tex == 0) {
@@ -4630,7 +2970,7 @@ index 49058ee..2e6dc93 100644
          xemu_main_loop_lock();
          // FIXME: Don't upload if notdirty
          xb_surface_gl_create_texture(scon->surface);
-@@ -846,14 +851,27 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -878,14 +897,27 @@ static void gl_render_frame(struct xemu_console *scon)
       * lock and perform rendering, but release before swap to avoid
       * possible lengthy blocking (for vsync).
       */
@@ -4660,8 +3000,8 @@ index 49058ee..2e6dc93 100644
          xemu_main_loop_lock();
          xb_surface_gl_destroy_texture(scon->surface);
          xemu_main_loop_unlock();
-@@ -863,6 +881,11 @@ static void gl_render_frame(struct xemu_console *scon)
-     SDL_GL_SwapWindow(scon->real_window);
+@@ -911,6 +943,11 @@ static void gl_render_frame(struct xemu_console *scon)
+ #endif
      assert(glGetError() == GL_NO_ERROR);
  
 +    if (!playback_only) {
@@ -4672,7 +3012,7 @@ index 49058ee..2e6dc93 100644
      qatomic_set(&rendering, false);
  
  #if DEBUG_XEMU_C
-@@ -870,15 +893,39 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -918,13 +955,28 @@ static void gl_render_frame(struct xemu_console *scon)
  #endif
  }
  
@@ -4690,17 +3030,28 @@ index 49058ee..2e6dc93 100644
  {
      struct xemu_console *scon = (struct xemu_console *)userdata;
  
--    if (event->type == SDL_EVENT_WINDOW_EXPOSED ||
--        event->type == SDL_EVENT_WINDOW_RESIZED) {
+-    if (event->type == SDL_EVENT_WINDOW_RESIZED) {
 +    /* Info: Console expose/resize events keep the full redraw path. */
 +    if ((event->type == SDL_EVENT_WINDOW_EXPOSED ||
 +         event->type == SDL_EVENT_WINDOW_RESIZED) &&
 +        scon->real_window &&
 +        event->window.windowID == SDL_GetWindowID(scon->real_window)) {
+ #ifdef _WIN32
+-        if (win32_dxgi_present_is_active()) {
++        if (event->type == SDL_EVENT_WINDOW_RESIZED &&
++            win32_dxgi_present_is_active()) {
+             int width;
+             int height;
+             if (!SDL_GetWindowSizeInPixels(scon->real_window, &width,
+@@ -937,9 +989,18 @@ static bool event_watch_callback(void *userdata, SDL_Event *event)
+         }
+ #endif
          gl_render_frame(scon);
+-    } else if (event->type == SDL_EVENT_WINDOW_EXPOSED) {
+-        gl_render_frame(scon);
 +        return true; // Ignored
-     }
- 
++    }
++
 +#if defined(_WIN32)
 +    /* Info: Modal Win32 move/resize callbacks present playback only; Debug Tools are not re-entered. */
 +    if ((event->type == SDL_EVENT_WINDOW_MOVED ||
@@ -4708,13 +3059,12 @@ index 49058ee..2e6dc93 100644
 +         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
 +        xemu_hud_is_detached_window_id(event->window.windowID)) {
 +        gl_render_playback_frame(scon);
-+    }
+     }
 +#endif
-+
+ 
      return true; // Ignored
  }
- 
-@@ -891,6 +938,8 @@ static void poll_events(struct xemu_console *scon)
+@@ -953,6 +1014,8 @@ static void poll_events(struct xemu_console *scon)
      xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
  
      while (SDL_PollEvent(ev)) {
@@ -4723,7 +3073,7 @@ index 49058ee..2e6dc93 100644
          xemu_main_loop_lock();
  
          // HUD must process events first so that if a controller is detached,
-@@ -939,13 +988,17 @@ static void poll_events(struct xemu_console *scon)
+@@ -1001,13 +1064,17 @@ static void poll_events(struct xemu_console *scon)
          xemu_main_loop_unlock();
      }
  
@@ -4743,7 +3093,7 @@ index 49058ee..2e6dc93 100644
      xemu_main_loop_lock();
      xemu_input_host_poll_commit(host_input_batch);
      xemu_input_update_controllers();
-@@ -1370,6 +1423,8 @@ int main(int argc, char **argv)
+@@ -1438,6 +1505,8 @@ int main(int argc, char **argv)
      tcg_register_init_ctx();
      qemu_set_current_aio_context(qemu_get_aio_context());
  
@@ -4753,7 +3103,7 @@ index 49058ee..2e6dc93 100644
      xemu_input_init();
      xemu_main_loop_unlock();
 diff --git a/ui/xui/actions.cc b/ui/xui/actions.cc
-index 865b2eb..af7f075 100644
+index 865b2eb478e4c7df05aefc3e7ddd4a5518953207..af7f07515d77a96a0bab7ed1ac705e43d8864f39 100644
 --- a/ui/xui/actions.cc
 +++ b/ui/xui/actions.cc
 @@ -23,8 +23,10 @@
@@ -4775,8 +3125,76 @@ index 865b2eb..af7f075 100644
      qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
  }
  
+diff --git a/ui/xui/gl-helpers.cc b/ui/xui/gl-helpers.cc
+index cdef85861fb6407cd1ba4ecb50491ab45d302201..ae163a27250073e5346232e764efc41e561c1522 100644
+--- a/ui/xui/gl-helpers.cc
++++ b/ui/xui/gl-helpers.cc
+@@ -975,23 +975,26 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip)
+     RenderFramebuffer(tex, width, height, flip, scale);
+ }
+ 
+-bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, int max_width, int max_height)
++bool RenderFramebufferToRgb(GLuint tex, bool flip,
++                            std::vector<uint8_t> &pixels, int &width,
++                            int &height, int max_width, int max_height)
+ {
+-    int width, height;
+-
+     glActiveTexture(GL_TEXTURE0);
+     glBindTexture(GL_TEXTURE_2D, tex);
+     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+ 
++    if (width <= 0 || height <= 0) {
++        return false;
++    }
++
+     width = height * GetDisplayAspectRatio(width, height);
+ 
+     if (!max_width) max_width = width;
+     if (!max_height) max_height = height;
+     ScaleDimensions(width, height, max_width, max_height, &width, &height);
+ 
+-    std::vector<uint8_t> pixels;
+-    pixels.resize(width * height * 3);
++    pixels.resize((size_t)width * (size_t)height * 3);
+ 
+     Fbo fbo(width, height);
+     fbo.Target();
+@@ -1006,6 +1009,19 @@ bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, in
+     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+     fbo.Restore();
+ 
++    return glGetError() == GL_NO_ERROR;
++}
++
++bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png,
++                            int max_width, int max_height)
++{
++    int width = 0;
++    int height = 0;
++    std::vector<uint8_t> pixels;
++    if (!RenderFramebufferToRgb(tex, flip, pixels, width, height,
++                                max_width, max_height)) {
++        return false;
++    }
+     return fpng::fpng_encode_image_to_memory(pixels.data(), width, height, 3, png);
+ }
+ 
+diff --git a/ui/xui/gl-helpers.hh b/ui/xui/gl-helpers.hh
+index 82da963e6baaa06ca6191fb8cab14d7ee9b95580..81e52f3cc35c6753f99c098a075b41612975f8c1 100644
+--- a/ui/xui/gl-helpers.hh
++++ b/ui/xui/gl-helpers.hh
+@@ -51,6 +51,7 @@ void RenderXmu(float frame_x, float frame_y, uint32_t primary_color,
+                uint32_t secondary_color);
+ void RenderFramebuffer(GLint tex, int width, int height, bool flip);
+ void RenderFramebuffer(GLint tex, int width, int height, bool flip, float scale[2]);
++bool RenderFramebufferToRgb(GLuint tex, bool flip, std::vector<uint8_t> &pixels, int &width, int &height, int max_width = 0, int max_height = 0);
+ bool RenderFramebufferToPng(GLuint tex, bool flip, std::vector<uint8_t> &png, int max_width = 0, int max_height = 0);
+ void SaveScreenshot(GLuint tex, bool flip);
+ void ScaleDimensions(int src_width, int src_height, int max_width, int max_height, int *out_width, int *out_height);
 diff --git a/ui/xui/input-manager.cc b/ui/xui/input-manager.cc
-index a18aa9f..3f67642 100644
+index a18aa9f9ced1e2a253daf6dd5e310d9310d61195..3f676424ff33eeabe0013f8314919b9854c18036 100644
 --- a/ui/xui/input-manager.cc
 +++ b/ui/xui/input-manager.cc
 @@ -2,6 +2,8 @@
@@ -4848,11 +3266,65 @@ index a18aa9f..3f67642 100644
  
      // Update gamepad inputs
      #define IM_SATURATE(V)                      (V < 0.0f ? 0.0f : V > 1.0f ? 1.0f : V)
+diff --git a/ui/xui/main-menu.cc b/ui/xui/main-menu.cc
+index 85997c1a5ed13dc205a117071178456b4c79e88b..9d74283aee5d8f1222f8f4132dc6c02c2549ffbe 100644
+--- a/ui/xui/main-menu.cc
++++ b/ui/xui/main-menu.cc
+@@ -27,6 +27,8 @@
+ #include "xemu-hud.h"
+ #include "misc.hh"
+ #include "gl-helpers.hh"
++#include "debug-tools/addons/Folder-HDD/folder-hdd-ui.hh"
++#include "debug-tools/addons/Video-Recorder/video-recorder-ui.hh"
+ #include "reporting.hh"
+ #include "qapi/error.h"
+ #include "actions.hh"
+@@ -79,6 +81,8 @@ void MainMenuGeneralView::Draw()
+                [](const char *path) {
+                    xemu_settings_set_string(&g_config.general.games_dir, path);
+                });
++
++    cmp_video_recorder_draw_settings();
+     // toggle("Throttle DVD/HDD speeds", &g_config.general.throttle_io,
+     //        "Limit DVD/HDD throughput to approximate Xbox load times");
+ }
+@@ -1519,10 +1523,6 @@ void MainMenuSystemView::Draw()
+         { ".rom Files", "rom" },
+         { "All Files", "*" }
+     };
+-    static const SDL_DialogFileFilter qcow_file_filters[] = {
+-        { ".qcow2 Files", "qcow2" },
+-        { "All Files", "*" }
+-    };
+ 
+     if (m_dirty) {
+         ImGui::TextColored(ImVec4(1, 0, 0, 1),
+@@ -1563,11 +1563,7 @@ void MainMenuSystemView::Draw()
+                    m_dirty = true;
+                    g_main_menu.UpdateAboutViewConfigInfo();
+                });
+-    FilePicker("Hard Disk", g_config.sys.files.hdd_path,
+-               qcow_file_filters, 2, false, [this](const char *path) {
+-                   xemu_settings_set_string(&g_config.sys.files.hdd_path, path);
+-                   m_dirty = true;
+-               });
++    cmp_folder_hdd_draw_settings(&m_dirty);
+     FilePicker("EEPROM", g_config.sys.files.eeprom_path,
+                rom_file_filters, 3, false, [this](const char *path) {
+                    xemu_settings_set_string(&g_config.sys.files.eeprom_path, path);
 diff --git a/ui/xui/main.cc b/ui/xui/main.cc
-index ace02bc..bf9a715 100644
+index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c4acf27a1 100644
 --- a/ui/xui/main.cc
 +++ b/ui/xui/main.cc
-@@ -47,6 +47,8 @@
+@@ -39,6 +39,7 @@
+ #include "input-manager.hh"
+ #include "snapshot-manager.hh"
+ #include "viewport-manager.hh"
++#include "debug-tools/addons/Video-Recorder/video-recorder-c.h"
+ #include "font-manager.hh"
+ #include "scene.hh"
+ #include "scene-manager.hh"
+@@ -47,6 +48,8 @@
  #include "notifications.hh"
  #include "monitor.hh"
  #include "debug.hh"
@@ -4861,7 +3333,7 @@ index ace02bc..bf9a715 100644
  #include "welcome.hh"
  #include "menubar.hh"
  #include "compat.hh"
-@@ -147,6 +149,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
+@@ -147,6 +150,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
      ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
      ImGui_ImplOpenGL3_Init("#version 150");
      ImPlot::CreateContext();
@@ -4869,7 +3341,7 @@ index ace02bc..bf9a715 100644
  
  #if defined(_WIN32)
      if (!g_config.general.show_welcome && g_config.general.updates.check) {
-@@ -161,6 +164,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
+@@ -161,6 +165,7 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
  
  void xemu_hud_cleanup(void)
  {
@@ -4877,7 +3349,7 @@ index ace02bc..bf9a715 100644
      ImGui_ImplOpenGL3_Shutdown();
      ImGui_ImplSDL3_Shutdown();
      ImGui::DestroyContext();
-@@ -173,6 +177,13 @@ void xemu_hud_process_sdl_events(SDL_Event *event)
+@@ -173,6 +178,13 @@ void xemu_hud_process_sdl_events(SDL_Event *event)
          return;
      }
  
@@ -4891,7 +3363,7 @@ index ace02bc..bf9a715 100644
      ImGui_ImplSDL3_ProcessEvent(event);
  }
  
-@@ -189,8 +200,31 @@ void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip)
+@@ -189,8 +201,31 @@ void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip)
      g_flip_req = flip;
  }
  
@@ -4923,7 +3395,7 @@ index ace02bc..bf9a715 100644
      ImGuiIO& io = ImGui::GetIO();
      uint32_t now = SDL_GetTicks();
  
-@@ -306,6 +340,14 @@ void xemu_hud_update(void)
+@@ -306,6 +341,14 @@ void xemu_hud_update(void)
          }
      }
  
@@ -4938,7 +3410,7 @@ index ace02bc..bf9a715 100644
      first_boot_window.Draw();
      monitor_window.Draw();
      apu_window.Draw();
-@@ -317,16 +359,39 @@ void xemu_hud_update(void)
+@@ -317,16 +360,39 @@ void xemu_hud_update(void)
      g_scene_mgr.Draw();
      if (!first_boot_window.is_open) notification_manager.Draw();
      g_snapshot_mgr.Draw();
@@ -4978,8 +3450,15 @@ index ace02bc..bf9a715 100644
      if (g_vsync != g_config.display.window.vsync) {
          g_vsync = g_config.display.window.vsync;
          SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
+@@ -336,4 +402,6 @@ void xemu_hud_render()
+         SaveScreenshot(g_tex, g_flip_req);
+         g_screenshot_pending = false;
+     }
++
++    xemu_video_recorder_capture(g_tex, g_flip_req ? 1 : 0);
+ }
 diff --git a/ui/xui/menubar.cc b/ui/xui/menubar.cc
-index 38e2d1b..20efc22 100644
+index 38e2d1b67fd331708789a5030cc91a90e260c388..20efc22afa4f2a3de657a03906bd849e5ae2a05b 100644
 --- a/ui/xui/menubar.cc
 +++ b/ui/xui/menubar.cc
 @@ -26,6 +26,7 @@
@@ -5000,7 +3479,7 @@ index 38e2d1b..20efc22 100644
              if (nv2a_dbg_renderdoc_available()) {
                  ImGui::MenuItem("RenderDoc: Capture", NULL, &g_capture_renderdoc_frame);
 diff --git a/ui/xui/meson.build b/ui/xui/meson.build
-index 334e0dd..eb15489 100644
+index 95d50cb303b394edc04ef00adb2ea976ddf54a40..42656dc8a97bfea63aa03386f0f9817be25a81f0 100644
 --- a/ui/xui/meson.build
 +++ b/ui/xui/meson.build
 @@ -23,6 +23,8 @@ xemu_ss.add(files(
@@ -5010,10 +3489,113 @@ index 334e0dd..eb15489 100644
 +# xemu RAW Cheat Engine / Memory / Debugger extensions live in their own subtree.
 +subdir('debug-tools')
  if host_os == 'windows'
-   xemu_ss.add(files('update.cc'))
+   xemu_ss.add(files('update.cc', 'win32-dxgi-present.cc'))
  endif
+diff --git a/ui/xui/notifications.cc b/ui/xui/notifications.cc
+index f4c5179e231d90c6aa4c8f07cdc35bfcb9a1b83a..ec8424a84a3cc62c5a4668473ecc03eed7f89ce9 100644
+--- a/ui/xui/notifications.cc
++++ b/ui/xui/notifications.cc
+@@ -35,7 +35,15 @@ void NotificationManager::QueueNotification(const char *msg)
+ 
+ void NotificationManager::QueueError(const char *msg)
+ {
+-    m_error_queue.push_back(strdup(msg));
++    m_error_queue.push_back({msg ? msg : "", "", nullptr, nullptr});
++}
++
++void NotificationManager::QueueErrorWithAction(
++    const char *msg, const char *action_label, XemuNotificationAction action,
++    void *opaque)
++{
++    m_error_queue.push_back({msg ? msg : "", action_label ? action_label : "",
++                             action, opaque});
+ }
+ 
+ void NotificationManager::Draw()
+@@ -73,14 +81,30 @@ void NotificationManager::Draw()
+     }
+     if (ImGui::BeginPopupModal("Error", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+     {
+-        ImGui::Text("%s", m_error_queue[0]);
++        ErrorEntry &entry = m_error_queue.front();
++        ImGui::Text("%s", entry.message.c_str());
+         ImGui::Dummy(ImVec2(0,16));
+-        ImGui::SetItemDefaultFocus();
+         ImGuiStyle &style = ImGui::GetStyle();
+-        ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+2*style.FramePadding.x));
++        const bool has_action = entry.action && !entry.action_label.empty();
++        const float spacing = has_action ? style.ItemSpacing.x : 0.0f;
++        const float buttons_width = has_action ? 240.0f + spacing : 120.0f;
++        ImGui::SetCursorPosX(ImGui::GetWindowWidth() -
++                             (buttons_width + 2 * style.FramePadding.x));
++        if (has_action) {
++            if (ImGui::Button(entry.action_label.c_str(), ImVec2(120, 0))) {
++                XemuNotificationAction action = entry.action;
++                void *opaque = entry.opaque;
++                ImGui::CloseCurrentPopup();
++                m_error_queue.pop_front();
++                action(opaque);
++                ImGui::EndPopup();
++                return;
++            }
++            ImGui::SameLine();
++        }
++        ImGui::SetItemDefaultFocus();
+         if (ImGui::Button("Ok", ImVec2(120, 0))) {
+             ImGui::CloseCurrentPopup();
+-            free((void*)m_error_queue[0]);
+             m_error_queue.pop_front();
+         }
+         ImGui::EndPopup();
+@@ -157,3 +181,10 @@ void xemu_queue_error_message(const char *msg)
+ {
+     notification_manager.QueueError(msg);
+ }
++
++void xemu_queue_error_message_with_action(
++    const char *msg, const char *action_label, XemuNotificationAction action,
++    void *opaque)
++{
++    notification_manager.QueueErrorWithAction(msg, action_label, action, opaque);
++}
+diff --git a/ui/xui/notifications.hh b/ui/xui/notifications.hh
+index 77a97d5915161c74141279d94de8df5f9e4a00ec..9b09922383848f5c2b7932b1acdf5cddbb0cfed5 100644
+--- a/ui/xui/notifications.hh
++++ b/ui/xui/notifications.hh
+@@ -19,6 +19,7 @@
+ #pragma once
+ #include <stdint.h>
+ #include <deque>
++#include <string>
+ 
+ #include "../xemu-notifications.h"
+ 
+@@ -26,7 +27,13 @@ class NotificationManager
+ {
+ private:
+     std::deque<const char *> m_notification_queue;
+-    std::deque<const char *> m_error_queue;
++    struct ErrorEntry {
++        std::string message;
++        std::string action_label;
++        XemuNotificationAction action = nullptr;
++        void *opaque = nullptr;
++    };
++    std::deque<ErrorEntry> m_error_queue;
+ 
+     const int kNotificationDuration = 4000;
+     uint32_t m_notification_end_time;
+@@ -37,6 +44,8 @@ public:
+     NotificationManager();
+     void QueueNotification(const char *msg);
+     void QueueError(const char *msg);
++    void QueueErrorWithAction(const char *msg, const char *action_label,
++                              XemuNotificationAction action, void *opaque);
+     void Draw();
+ 
+ private:
 diff --git a/ui/xui/xemu-hud.h b/ui/xui/xemu-hud.h
-index 0e812fe..85b7826 100644
+index 0e812fef9414429f50fcbb2678ed66fa334f9eaa..85b782634be11edc1f3916a3455a1653a63a80c0 100644
 --- a/ui/xui/xemu-hud.h
 +++ b/ui/xui/xemu-hud.h
 @@ -43,10 +43,14 @@ void xemu_main_loop_unlock(void);
@@ -5032,7 +3614,7 @@ index 0e812fe..85b7826 100644
  #ifdef __cplusplus
  }
 diff --git a/util/main-loop.c b/util/main-loop.c
-index 42ecfb8..5c35913 100644
+index 42ecfb86bd3506b54016876f9d1be15207c57427..5c3591395346ab9d6078655c659780cd36f6218d 100644
 --- a/util/main-loop.c
 +++ b/util/main-loop.c
 @@ -35,6 +35,9 @@
@@ -5258,7 +3840,7 @@ index 42ecfb8..5c35913 100644
  
  /* Functions to operate on the main QEMU AioContext.  */
 diff --git a/util/qemu-timer.c b/util/qemu-timer.c
-index 650030c..bb91fe9 100644
+index 650030c98b1679d440722711c316fc458eddd0ac..bb91fe922eb5084e662c47714506ed32cb5391de 100644
 --- a/util/qemu-timer.c
 +++ b/util/qemu-timer.c
 @@ -30,6 +30,8 @@
@@ -5491,52 +4073,3 @@ index 650030c..bb91fe9 100644
          qemu_mutex_lock(&timer_list->active_timers_lock);
  
          progress = true;
-diff --git a/xemu-xbe.c b/xemu-xbe.c
-index aa31a88..92b93bb 100644
---- a/xemu-xbe.c
-+++ b/xemu-xbe.c
-@@ -84,11 +84,11 @@ struct xbe *xemu_get_xbe_info(void)
-     vaddr hdr_addr_virt = 0x10000;
- 
-     static struct xbe xbe = {0};
-+    static uint32_t headers_capacity;
- 
--    if (xbe.headers) {
--        free(xbe.headers);
--        xbe.headers = NULL;
--    }
-+    /* Info: Clear parsed pointers before reusing the XBE header scratch buffer. */
-+    xbe.header = NULL;
-+    xbe.cert = NULL;
- 
-     // Get physical page of headers
-     hwaddr hdr_addr_phys = 0;
-@@ -110,8 +110,18 @@ struct xbe *xemu_get_xbe_info(void)
-         return NULL;
-     }
- 
--    xbe.headers = malloc(xbe.headers_len);
--    assert(xbe.headers != NULL);
-+    /* Info: Reuse XBE header storage while rereading complete header bytes each poll. */
-+    if (xbe.headers_len == 0) {
-+        free(xbe.headers);
-+        xbe.headers = malloc(0);
-+        headers_capacity = 0;
-+        assert(xbe.headers != NULL);
-+    } else if (xbe.headers == NULL || headers_capacity < xbe.headers_len) {
-+        uint8_t *headers = realloc(xbe.headers, xbe.headers_len);
-+        assert(headers != NULL);
-+        xbe.headers = headers;
-+        headers_capacity = xbe.headers_len;
-+    }
- 
-     // Read all XBE headers
-     ssize_t bytes_read = virt_dma_memory_read(hdr_addr_virt,
-@@ -129,6 +139,7 @@ struct xbe *xemu_get_xbe_info(void)
-     vaddr cert_addr_virt = ldl_le_p(&xbe.header->m_certificate_addr);
-     if ((cert_addr_virt == 0) || ((cert_addr_virt + sizeof(struct xbe_certificate)) > (hdr_addr_virt + xbe.headers_len))) {
-         // Invalid certificate header (a valid certificate is expected for official titles)
-+        xbe.header = NULL;
-         return NULL;
-     }
-     xbe.cert = (struct xbe_certificate *)(xbe.headers + cert_addr_virt - hdr_addr_virt);

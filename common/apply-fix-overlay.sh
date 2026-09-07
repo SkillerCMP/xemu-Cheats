@@ -11,6 +11,19 @@ FIX_ROOT="$2"
 
 [[ -d "$SRC" ]] || { echo "FIX overlay: source root does not exist: $SRC" >&2; exit 1; }
 
+# Sort FIX paths by natural basename order so numeric patch bands behave as
+# intended: 10 -> 20 -> 30 -> 40 -> 300 (plain lexical sort can misorder numeric patch bands).
+sort_fix_paths_natural() {
+  python3 -c '
+import os, re, sys
+def key(path):
+    name = os.path.basename(path.rstrip("\n"))
+    return [int(x) if x.isdigit() else x.lower() for x in re.split(r"([0-9]+)", name)]
+for path in sorted((line.rstrip("\n") for line in sys.stdin if line.strip()), key=key):
+    print(path)
+'
+}
+
 applied=0
 if [[ -d "$FIX_ROOT" ]]; then
   echo "FIX overlay: checking $FIX_ROOT"
@@ -42,9 +55,9 @@ while IFS= read -r archive; do
 
   cp -a "$PAYLOAD"/. "$SRC"/
   rm -rf "$TMP_FIX"
-done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.zip' -print | LC_ALL=C sort)
+done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.zip' -print | sort_fix_paths_natural)
 
-# Apply top-level source patches next, alphabetically. We prefer git apply
+# Apply top-level source patches next, in natural numeric basename order. We prefer git apply
 # because it understands normal Git patches (including mode/binary metadata).
 # If git's stricter context matching rejects a text patch only because earlier
 # fixes shifted its hunk location, fall back to patch(1) with fuzz disabled.
@@ -85,7 +98,7 @@ while IFS= read -r patch_file; do
 
   rm -f "$GIT_LOG" "$PATCH_LOG"
   echo "FIX patch applied: $patch_name ($patch_method)"
-done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.patch' -print | LC_ALL=C sort)
+done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.patch' -print | sort_fix_paths_natural)
 
 # Loose files are applied last and therefore have highest precedence. This
 # makes quick one-file experiments easy without rebuilding a fix-pack ZIP.

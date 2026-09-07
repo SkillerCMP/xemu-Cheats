@@ -39,6 +39,10 @@ if /I "%SOURCEOPT%"=="main+memory" (
   set "PROFILE=main+memory"
   set "SOURCEOPT="
 )
+if /I "%SOURCEOPT%"=="folder-hdd" (
+  set "PROFILE=folder-hdd"
+  set "SOURCEOPT="
+)
 if /I "%SOURCEOPT%"=="full" (
   set "PROFILE=full"
   set "SOURCEOPT="

@@ -1,5 +1,5 @@
 diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
-index 396d8119bcdaf07a7533691ecdc9dca664c375ad..3f6c751e24e61f059c93be8268bfaed04ad7650b 100644
+index 396d811..3f6c751 100644
 --- a/hw/xbox/xid.c
 +++ b/hw/xbox/xid.c
 @@ -61,7 +61,7 @@ void update_input(USBXIDGamepadState *s)
@@ -12,10 +12,149 @@ index 396d8119bcdaf07a7533691ecdc9dca664c375ad..3f6c751e24e61f059c93be8268bfaed0
      const int button_map_analog[6][2] = {
          { GAMEPAD_A,     CONTROLLER_BUTTON_A     },
 diff --git a/ui/xemu-input.c b/ui/xemu-input.c
-index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f9f0d981e 100644
+index 13193f0..a31e90b 100644
 --- a/ui/xemu-input.c
 +++ b/ui/xemu-input.c
-@@ -479,8 +479,208 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+@@ -277,6 +277,7 @@ void xemu_input_init(void)
+     new_con->type = INPUT_DEVICE_SDL_KEYBOARD;
+     new_con->name = "Keyboard";
+     new_con->bound = -1;
++    new_con->connected = true;
+     new_con->peripheral_types[0] = PERIPHERAL_NONE;
+     new_con->peripheral_types[1] = PERIPHERAL_NONE;
+     new_con->peripherals[0] = NULL;
+@@ -359,25 +360,65 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+             return;
+         }
+ 
+-        // Success! Create a new node to track this controller and continue init
+-        ControllerState *new_con = malloc(sizeof(ControllerState));
++        SDL_Joystick *sdl_joystick = SDL_GetGamepadJoystick(sdl_con);
++        SDL_JoystickID sdl_joystick_id = SDL_GetJoystickID(sdl_joystick);
++        SDL_GUID sdl_joystick_guid = SDL_GetJoystickGUID(sdl_joystick);
++        const char *sdl_name = SDL_GetGamepadName(sdl_con);
++        char guid_buf[35] = { 0 };
++        SDL_GUIDToString(sdl_joystick_guid, guid_buf, sizeof(guid_buf));
++        DPRINTF("Opened %s (%s)\n", sdl_name, guid_buf);
++
++        /* Info: Reconnect the same host GUID without guest XID re-enumeration. */
++        ControllerState *new_con = NULL;
++        ControllerState *iter;
++        QTAILQ_FOREACH(iter, &available_controllers, entry) {
++            if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || iter->connected ||
++                iter->bound < 0) {
++                continue;
++            }
++            if (memcmp(&iter->sdl_joystick_guid, &sdl_joystick_guid,
++                       sizeof(SDL_GUID)) == 0) {
++                new_con = iter;
++                break;
++            }
++        }
++
++        if (new_con != NULL) {
++            new_con->name = sdl_name;
++            new_con->sdl_gamepad = sdl_con;
++            new_con->sdl_joystick = sdl_joystick;
++            new_con->sdl_joystick_id = sdl_joystick_id;
++            new_con->sdl_joystick_guid = sdl_joystick_guid;
++            new_con->connected = true;
++            new_con->last_input_updated_ts = 0;
++            new_con->last_rumble_updated_ts = 0;
++            new_con->buttons = 0;
++            memset(new_con->axis, 0, sizeof(new_con->axis));
++            xemu_input_bindings_reload_map(new_con);
++
++            char buf[128];
++            snprintf(buf, sizeof(buf), "Reconnected '%s' to port %d",
++                     new_con->name, new_con->bound + 1);
++            xemu_queue_notification(buf);
++            return;
++        }
++
++        // Success! Create a new node to track this controller and continue init.
++        new_con = malloc(sizeof(ControllerState));
+         memset(new_con, 0, sizeof(ControllerState));
+         new_con->type                 = INPUT_DEVICE_SDL_GAMEPAD;
+-        new_con->name                 = SDL_GetGamepadName(sdl_con);
++        new_con->name                 = sdl_name;
+         new_con->sdl_gamepad          = sdl_con;
+-        new_con->sdl_joystick         = SDL_GetGamepadJoystick(new_con->sdl_gamepad);
+-        new_con->sdl_joystick_id      = SDL_GetJoystickID(new_con->sdl_joystick);
+-        new_con->sdl_joystick_guid    = SDL_GetJoystickGUID(new_con->sdl_joystick);
++        new_con->sdl_joystick         = sdl_joystick;
++        new_con->sdl_joystick_id      = sdl_joystick_id;
++        new_con->sdl_joystick_guid    = sdl_joystick_guid;
+         new_con->bound                = -1;
++        new_con->connected            = true;
+         new_con->peripheral_types[0] = PERIPHERAL_NONE;
+         new_con->peripheral_types[1] = PERIPHERAL_NONE;
+         new_con->peripherals[0] = NULL;
+         new_con->peripherals[1] = NULL;
+ 
+-        char guid_buf[35] = { 0 };
+-        SDL_GUIDToString(new_con->sdl_joystick_guid, guid_buf, sizeof(guid_buf));
+-        DPRINTF("Opened %s (%s)\n", new_con->name, guid_buf);
+-
+         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
+         xemu_input_bindings_reload_map(new_con);
+ 
+@@ -439,31 +480,41 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+             if (iter->sdl_joystick_id == event->gdevice.which) {
+                 DPRINTF("Device removed: %s\n", iter->name);
+ 
+-                // Disconnect
+                 if (iter->bound >= 0) {
+-                    // Queue a notification to inform user controller disconnected
+-                    // FIXME: Probably replace with a callback registration thing,
+-                    // but this works well enough for now.
++                    /* Info: Keep the guest XID device present with neutral input while host hardware is absent. */
+                     char buf[128];
+-                    snprintf(buf, sizeof(buf), "Port %d disconnected", iter->bound+1);
++                    snprintf(buf, sizeof(buf), "Port %d controller disconnected; guest controller retained",
++                             iter->bound + 1);
+                     xemu_queue_notification(buf);
+ 
+-                    // Unbind the controller, but don't save the unbinding in
+-                    // case the controller is reconnected
+-                    xemu_input_bind(iter->bound, NULL, 0);
++                    iter->buttons = 0;
++                    memset(iter->axis, 0, sizeof(iter->axis));
++                    iter->rumble_l = 0;
++                    iter->rumble_r = 0;
++                    if (iter->sdl_gamepad) {
++                        SDL_RumbleGamepad(iter->sdl_gamepad, 0, 0, 0);
++                        SDL_CloseGamepad(iter->sdl_gamepad);
++                    }
++                    iter->name = "Disconnected Controller";
++                    iter->sdl_gamepad = NULL;
++                    iter->sdl_joystick = NULL;
++                    iter->connected = false;
++                    iter->last_input_updated_ts = 0;
++                    iter->last_rumble_updated_ts = 0;
++
++                    handled = 1;
++                    break;
+                 }
+ 
+-                // Unlink
++                // Unbound host devices have no guest XID to preserve.
+                 QTAILQ_REMOVE(&available_controllers, iter, entry);
+-
+-                // Deallocate
+                 if (iter->sdl_gamepad) {
+                     SDL_CloseGamepad(iter->sdl_gamepad);
+                 }
+-
+                 for (int i = 0; i < 2; i++) {
+-                    if (iter->peripherals[i])
++                    if (iter->peripherals[i]) {
+                         g_free(iter->peripherals[i]);
++                    }
+                 }
+                 free(iter);
+ 
+@@ -479,8 +530,208 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
      }
  }
  
@@ -96,7 +235,7 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
 +    ControllerState *iter;
 +
 +    QTAILQ_FOREACH(iter, &available_controllers, entry) {
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
++        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
 +            iter->sdl_gamepad == NULL || iter->controller_map == NULL) {
 +            continue;
 +        }
@@ -113,7 +252,7 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
 +
 +    size_t index = 0;
 +    QTAILQ_FOREACH(iter, &available_controllers, entry) {
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
++        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
 +            iter->sdl_gamepad == NULL || iter->controller_map == NULL) {
 +            continue;
 +        }
@@ -177,7 +316,7 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
 +        if (iter != entry->state) {
 +            continue;
 +        }
-+        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD ||
++        if (iter->type != INPUT_DEVICE_SDL_GAMEPAD || !iter->connected ||
 +            iter->sdl_gamepad != entry->sdl_gamepad ||
 +            iter->sdl_joystick_id != entry->sdl_joystick_id) {
 +            return NULL;
@@ -224,7 +363,7 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
      int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
      if (ABS(now - state->last_input_updated_ts) <
          XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US) {
-@@ -489,8 +689,6 @@ void xemu_input_update_controller(ControllerState *state)
+@@ -489,8 +740,6 @@ void xemu_input_update_controller(ControllerState *state)
  
      if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
          xemu_input_update_sdl_kbd_controller_state(state);
@@ -233,7 +372,19 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
      }
  
      state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-@@ -558,74 +756,6 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
+@@ -500,7 +749,10 @@ void xemu_input_update_controllers(void)
+ {
+     ControllerState *iter;
+     QTAILQ_FOREACH(iter, &available_controllers, entry) {
+-        xemu_input_update_controller(iter);
++        /* Info: SDL gamepads use cached host-poll state; keyboard refresh remains local. */
++        if (iter->type == INPUT_DEVICE_SDL_KEYBOARD) {
++            xemu_input_update_controller(iter);
++        }
+     }
+     QTAILQ_FOREACH(iter, &available_controllers, entry) {
+         xemu_input_update_rumble(iter);
+@@ -558,74 +810,6 @@ void xemu_input_update_sdl_kbd_controller_state(ControllerState *state)
  #undef KBD_STATE
  }
  
@@ -309,13 +460,21 @@ index 13193f04f57e973da03dfbcbbc4c15dd10cef73a..87f6d1e2be2809fcfe3a8875ea43195f
  {
      if (state->type != INPUT_DEVICE_SDL_GAMEPAD) {
 diff --git a/ui/xemu-input.h b/ui/xemu-input.h
-index 0eb2af9d429de7af95cbcf17084f88191a1c7c52..9b66ea4ab1fa5984724c172b0e8baadd44eb2f3c 100644
+index 0eb2af9..294b5a7 100644
 --- a/ui/xemu-input.h
 +++ b/ui/xemu-input.h
-@@ -126,10 +126,18 @@ extern int *g_keyboard_scancode_map[25];
+@@ -103,6 +103,7 @@ typedef struct ControllerState {
+     SDL_Joystick       *sdl_joystick;
+     SDL_JoystickID      sdl_joystick_id;
+     SDL_GUID            sdl_joystick_guid;
++    bool                connected; // Host device present; guest XID may persist while false.
+ 
+     enum peripheral_type peripheral_types[2];
+     void *peripherals[2];
+@@ -126,10 +127,18 @@ extern int *g_keyboard_scancode_map[25];
  
  void xemu_input_init(void);
- void xemu_input_process_sdl_events(const SDL_Event *event); // SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED
+ void xemu_input_process_sdl_events(const SDL_Event *event);
 +
 +typedef struct XemuInputHostPollBatch XemuInputHostPollBatch;
 +
@@ -333,7 +492,7 @@ index 0eb2af9d429de7af95cbcf17084f88191a1c7c52..9b66ea4ab1fa5984724c172b0e8baadd
  ControllerState *xemu_input_get_bound(int index);
  void xemu_input_bind(int index, ControllerState *state, int save);
 diff --git a/ui/xemu.c b/ui/xemu.c
-index 4a2f0bac5792c185ba948174f1d7639cf3f9a965..581a3a25a75886d36ebb6ee4a8f69a8c97e9dd7a 100644
+index 4a2f0ba..581a3a2 100644
 --- a/ui/xemu.c
 +++ b/ui/xemu.c
 @@ -940,8 +940,18 @@ static void poll_events(struct xemu_console *scon)
