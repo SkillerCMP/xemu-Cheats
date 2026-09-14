@@ -1,0 +1,1018 @@
+From: XEMU local matrix builder
+Subject: [PATCH 60] NV2A Vulkan: bounded immutable vertex snapshots
+
+Core renderer experiment, independent of Debug Tools. Preserve guest vertex
+indices and existing finish/fence fallback; stage per-draw immutable bytes in
+the existing inline arena. XEMU_VK_VERTEX_SNAPSHOTS=0 selects the stock path.
+
+diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
+--- a/hw/xbox/nv2a/pgraph/vk/draw.c
++++ b/hw/xbox/nv2a/pgraph/vk/draw.c
+@@ -1723,2 +1723,13 @@
+ 
++    /* Fix 60 plans before pipeline preparation, copies after every helper
++     * which can finish, and never overwrites BUFFER_VERTEX_RAM on this path. */
++    if (pgraph_vk_prepare_vertex_snapshot(d)) {
++        return;
++    }
++
++    if (r->vertex_snapshots_enabled) {
++        r->vertex_snapshot_fallbacks++;
++        pgraph_vk_invalidate_vertex_snapshot_mirror(d);
++    }
++
+     if (r->num_vertex_ram_buffer_syncs == 0) {
+@@ -2101,2 +2112,7 @@
+ 
++    if (r->vertex_snapshot.active) {
++        remap.attributes = UINT16_MAX;
++        return remap;
++    }
++
+     VkDeviceAddress output_offset = 0;
+@@ -2168,2 +2184,7 @@
+ 
++    if (r->vertex_snapshot.active) {
++        pgraph_vk_copy_vertex_snapshot(d);
++        return;
++    }
++
+     if (!remap.attributes) {
+diff --git a/hw/xbox/nv2a/pgraph/vk/vertex.c b/hw/xbox/nv2a/pgraph/vk/vertex.c
+--- a/hw/xbox/nv2a/pgraph/vk/vertex.c
++++ b/hw/xbox/nv2a/pgraph/vk/vertex.c
+@@ -350 +350,237 @@
+ }
++
++/* Fix 60: immutable per-draw RAM vertices in the existing inline arena.
++ *
++ * This is buffer versioning, not a fence bypass. Existing vertex RAM updates
++ * and their uploaded-page fence remain untouched for fallback draws. Snapshots
++ * do not clear DIRTY_MEMORY_NV2A; an enabled fallback nevertheless refreshes all
++ * requested RAM ranges because surface handling can share that dirty client.
++ *
++ * The arena is transferred by sync_staging_buffer() before the main command
++ * buffer, with the existing transfer -> vertex-input dependency and semaphore.
++ * A wrap uses pgraph_vk_finish() before reuse, including its original fence wait.
++ */
++
++static uint32_t vertex_snapshot_format_width(VkFormat format)
++{
++    switch (format) {
++    case VK_FORMAT_R8_UNORM: return 1;
++    case VK_FORMAT_R8G8_UNORM:
++    case VK_FORMAT_R16_SNORM:
++    case VK_FORMAT_R16_SSCALED: return 2;
++    case VK_FORMAT_R8G8B8_UNORM: return 3;
++    case VK_FORMAT_R8G8B8A8_UNORM:
++    case VK_FORMAT_R16G16_SNORM:
++    case VK_FORMAT_R16G16_SSCALED:
++    case VK_FORMAT_R32_SFLOAT:
++    case VK_FORMAT_R32_SINT: return 4;
++    case VK_FORMAT_R16G16B16_SNORM:
++    case VK_FORMAT_R16G16B16_SSCALED: return 6;
++    case VK_FORMAT_R16G16B16A16_SNORM:
++    case VK_FORMAT_R16G16B16A16_SSCALED:
++    case VK_FORMAT_R32G32_SFLOAT: return 8;
++    case VK_FORMAT_R32G32B32_SFLOAT: return 12;
++    case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
++    default: return 0;
++    }
++}
++
++/* Validate/merge before making calls with side effects. Download dependencies
++ * include stock page-rounded requirements and the exact fetched byte spans
++ * (which can extend beyond stride for overlapping attribute layouts).
++ */
++static bool vertex_snapshot_add_range(MemorySyncRequirement *ranges,
++                                      size_t *count, hwaddr addr, hwaddr size,
++                                      uint64_t ram_size)
++{
++    if (addr > ram_size || size > ram_size - addr || *count >= 32) {
++        return false;
++    }
++    if (!size) {
++        return true;
++    }
++    hwaddr first = addr & TARGET_PAGE_MASK;
++    hwaddr end = addr + size;
++    hwaddr padding = (TARGET_PAGE_SIZE - end % TARGET_PAGE_SIZE) % TARGET_PAGE_SIZE;
++    if (padding > ram_size - end) {
++        return false;
++    }
++    end += padding;
++    size_t pos = (*count)++;
++    while (pos && ranges[pos - 1].addr > first) {
++        ranges[pos] = ranges[pos - 1];
++        pos--;
++    }
++    ranges[pos] = (MemorySyncRequirement){ .addr = first, .size = end - first };
++    return true;
++}
++
++bool pgraph_vk_prepare_vertex_snapshot(NV2AState *d)
++{
++    PGRAPHState *pg = &d->pgraph;
++    PGRAPHVkState *r = pg->vk_renderer_state;
++    StorageBuffer *buffer = &r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING];
++    VertexSnapshotAttribute attrs[NV2A_VK_SNAPSHOT_ATTRS];
++    VertexSnapshot plan;
++    MemorySyncRequirement ranges[32];
++    size_t nranges = 0, start;
++    uint32_t first = UINT32_MAX, last = 0;
++    uint64_t ram_size = memory_region_size(d->vram);
++    r->vertex_snapshot.active = false;
++
++    if (!r->vertex_snapshots_enabled || !r->vertex_snapshot_scratch ||
++        !buffer->mapped ||
++        r->num_active_vertex_binding_descriptions <= 0 ||
++        r->num_active_vertex_binding_descriptions > NV2A_VK_SNAPSHOT_ATTRS ||
++        r->num_active_vertex_attribute_descriptions !=
++            r->num_active_vertex_binding_descriptions ||
++        r->num_vertex_ram_buffer_syncs > NV2A_VERTEXSHADER_ATTRIBUTES ||
++        pg->draw_arrays_length > ARRAY_SIZE(pg->draw_arrays_start) ||
++        pg->inline_elements_length > ARRAY_SIZE(pg->inline_elements)) {
++        return false;
++    }
++    if (pg->draw_arrays_length) {
++        for (unsigned int i = 0; i < pg->draw_arrays_length; i++) {
++            if (pg->draw_arrays_start[i] < 0 || pg->draw_arrays_count[i] <= 0) {
++                return false;
++            }
++            uint64_t end = (uint64_t)(uint32_t)pg->draw_arrays_start[i] +
++                           (uint32_t)pg->draw_arrays_count[i];
++            if (end > UINT32_MAX) {
++                return false;
++            }
++            first = MIN(first, (uint32_t)pg->draw_arrays_start[i]);
++            last = MAX(last, (uint32_t)end - 1);
++        }
++    } else if (pg->inline_elements_length) {
++        for (unsigned int i = 0; i < pg->inline_elements_length; i++) {
++            first = MIN(first, pg->inline_elements[i]);
++            last = MAX(last, pg->inline_elements[i]);
++        }
++    } else {
++        return false;
++    }
++    for (int i = 0; i < r->num_active_vertex_binding_descriptions; i++) {
++        const VkVertexInputAttributeDescription *a = &r->vertex_attribute_descriptions[i];
++        const VkVertexInputBindingDescription *b = &r->vertex_binding_descriptions[i];
++        if (a->location >= NV2A_VK_SNAPSHOT_ATTRS || a->binding != (uint32_t)i ||
++            b->binding != (uint32_t)i || a->offset != 0 ||
++            b->inputRate != VK_VERTEX_INPUT_RATE_VERTEX) {
++            return false;
++        }
++        attrs[i] = (VertexSnapshotAttribute){
++            .source = r->vertex_attribute_offsets[a->location],
++            .stride = b->stride,
++            .width = vertex_snapshot_format_width(a->format),
++            .location = a->location,
++        };
++    }
++    if (!nv2a_vk_snapshot_plan(&plan, attrs,
++                              r->num_active_vertex_binding_descriptions,
++                              first, last, ram_size, buffer->buffer_size)) {
++        return false;
++    }
++    for (size_t i = 0; i < r->num_vertex_ram_buffer_syncs; i++) {
++        MemorySyncRequirement s = r->vertex_ram_buffer_syncs[i];
++        if (!vertex_snapshot_add_range(ranges, &nranges, s.addr, s.size, ram_size)) {
++            return false;
++        }
++    }
++    for (uint32_t i = 0; i < plan.count; i++) {
++        const VertexSnapshotAttribute *a = &plan.attributes[i];
++        uint64_t addr = a->source + (uint64_t)first * a->stride;
++        uint64_t size = (uint64_t)(last - first) * a->stride + a->width;
++        if (!vertex_snapshot_add_range(ranges, &nranges, addr, size, ram_size)) {
++            return false;
++        }
++    }
++    size_t merged = 0;
++    for (size_t i = 0; i < nranges; i++) {
++        if (merged && ranges[i].addr <= ranges[merged - 1].addr + ranges[merged - 1].size) {
++            hwaddr end = MAX(ranges[i].addr + ranges[i].size,
++                             ranges[merged - 1].addr + ranges[merged - 1].size);
++            ranges[merged - 1].size = end - ranges[merged - 1].addr;
++        } else {
++            ranges[merged++] = ranges[i];
++        }
++    }
++    /* No allocation/copy/stride mutation has happened before validation. */
++    for (size_t i = 0; i < merged; i++) {
++        pgraph_vk_download_surfaces_in_range_if_dirty(pg, ranges[i].addr, ranges[i].size);
++    }
++    if (!nv2a_vk_snapshot_space(buffer->buffer_offset, buffer->buffer_size,
++                               plan.bytes, &start)) {
++        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
++    }
++    /* Do not overwrite old allocations even if a future finish implementation
++     * does not reclaim this arena. Fall back to the original synchronized path.
++     */
++    if (!nv2a_vk_snapshot_space(buffer->buffer_offset, buffer->buffer_size,
++                               plan.bytes, &start)) {
++        return false;
++    }
++    /* Capture before expensive pipeline/descriptor helpers, at the same
++     * synchronization point as the original RAM mirror update. The CPU-only
++     * scratch is not referenced by any GPU work and survives arena resets. */
++    nv2a_vk_snapshot_copy(&plan, d->vram_ptr, r->vertex_snapshot_scratch);
++    for (uint32_t i = 0; i < plan.count; i++) {
++        r->vertex_binding_descriptions[i].stride = plan.attributes[i].width;
++    }
++    r->vertex_snapshot = plan;
++    r->num_vertex_ram_buffer_syncs = 0;
++    return true;
++}
++
++void pgraph_vk_copy_vertex_snapshot(NV2AState *d)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    StorageBuffer *buffer = &r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING];
++    VertexSnapshot *plan = &r->vertex_snapshot;
++    size_t start = 0;
++    /* Called after begin_pre_draw: descriptor/framebuffer helpers may have
++     * finished and reset the arena since preparation. Re-read the cursor now.
++     * No finish is allowed here; the current draw has not begun yet.
++     */
++    bool fits = nv2a_vk_snapshot_space(buffer->buffer_offset, buffer->buffer_size,
++                                       plan->bytes, &start);
++    if (!plan->active || !fits || !buffer->mapped) {
++        /* Keep the bounds check effective even in NDEBUG builds. */
++        fprintf(stderr, "Fix 60: vertex snapshot reservation lost\n");
++        abort();
++    }
++    memcpy(buffer->mapped + start, r->vertex_snapshot_scratch, plan->bytes);
++    for (uint32_t i = 0; i < plan->count; i++) {
++        const VertexSnapshotAttribute *a = &plan->attributes[i];
++        r->vertex_attribute_offsets[a->location] = start + a->offset;
++    }
++    buffer->buffer_offset = start + plan->bytes;
++    /* RANDOM host access does not imply HOST_COHERENT. Explicitly flush the
++     * snapshot range before the existing auxiliary transfer submission.
++     */
++    VK_CHECK(vmaFlushAllocation(r->allocator, buffer->allocation, start, plan->bytes));
++    nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_3);
++    r->vertex_snapshot_draws++;
++    r->vertex_snapshot_bytes += plan->bytes;
++    plan->active = false;
++}
++
++/* Fallback ownership handoff: snapshots deliberately did not update the RAM
++ * mirror. Re-dirty only the upcoming draw's requested ranges, so the unchanged
++ * stock dirty test/update path refreshes them even if surface handling consumed
++ * that dirty client's flags. No guest bytes or other dirty clients are changed.
++ */
++void pgraph_vk_invalidate_vertex_snapshot_mirror(NV2AState *d)
++{
++    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
++    uint64_t ram_size = memory_region_size(d->vram);
++    if (r->num_vertex_ram_buffer_syncs > ARRAY_SIZE(r->vertex_ram_buffer_syncs)) {
++        return;
++    }
++    for (size_t i = 0; i < r->num_vertex_ram_buffer_syncs; i++) {
++        const MemorySyncRequirement *s = &r->vertex_ram_buffer_syncs[i];
++        if (s->size && s->addr <= ram_size && s->size <= ram_size - s->addr) {
++            memory_region_set_client_dirty(d->vram, s->addr, s->size,
++                                           DIRTY_MEMORY_NV2A);
++        }
++    }
++}
+diff --git a/hw/xbox/nv2a/pgraph/vk/buffer.c b/hw/xbox/nv2a/pgraph/vk/buffer.c
+--- a/hw/xbox/nv2a/pgraph/vk/buffer.c
++++ b/hw/xbox/nv2a/pgraph/vk/buffer.c
+@@ -48,6 +48,24 @@
+     PGRAPHState *pg = &d->pgraph;
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    /* Sample once per renderer initialization; 0 is the comparison/off path. */
++    const char *snapshots = getenv("XEMU_VK_VERTEX_SNAPSHOTS");
++    r->vertex_snapshots_enabled = !snapshots || strcmp(snapshots, "0") != 0;
++    r->vertex_snapshot = (VertexSnapshot){ 0 };
++    r->vertex_snapshot_scratch = r->vertex_snapshots_enabled ?
++        g_try_malloc0(NV2A_VK_SNAPSHOT_LIMIT) : NULL;
++    if (!r->vertex_snapshot_scratch) {
++        if (r->vertex_snapshots_enabled) {
++            fprintf(stderr, "xemu: Fix 60 scratch allocation failed; using stock path\n");
++        }
++        r->vertex_snapshots_enabled = false;
++    }
++    r->vertex_snapshot_draws = 0;
++    r->vertex_snapshot_fallbacks = 0;
++    r->vertex_snapshot_bytes = 0;
++    fprintf(stderr, "xemu: Fix 60 Vulkan vertex snapshots: %s\n",
++            r->vertex_snapshots_enabled ? "enabled" : "disabled (stock path)");
++
+     // FIXME: Profile buffer sizes
+ 
+     VmaAllocationCreateInfo host_alloc_create_info = {
+@@ -167,6 +185,14 @@
+         destroy_buffer(pg, &r->storage_buffers[i]);
+     }
+ 
++    fprintf(stderr, "xemu: Fix 60 snapshots: draws=%" PRIu64
++            " fallback_draws=%" PRIu64 " staged_bytes=%" PRIu64 "\n",
++            r->vertex_snapshot_draws, r->vertex_snapshot_fallbacks,
++            r->vertex_snapshot_bytes);
++    g_free(r->vertex_snapshot_scratch);
++    r->vertex_snapshot_scratch = NULL;
++    r->vertex_snapshot.active = false;
++
+     g_free(r->uploaded_bitmap);
+     r->uploaded_bitmap = NULL;
+ }
+diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.h b/hw/xbox/nv2a/pgraph/vk/renderer.h
+--- a/hw/xbox/nv2a/pgraph/vk/renderer.h
++++ b/hw/xbox/nv2a/pgraph/vk/renderer.h
+@@ -40,6 +40,7 @@
+ #include "debug.h"
+ #include "constants.h"
+ #include "glsl.h"
++#include "vertex-snapshot.h"
+ 
+ #define HAVE_EXTERNAL_MEMORY 1
+ 
+@@ -370,6 +371,14 @@
+     int descriptor_set_index;
+ 
+     StorageBuffer storage_buffers[BUFFER_COUNT];
++
++    /* Fix 60: one pending draw plan; bytes live in the existing inline arena. */
++    VertexSnapshot vertex_snapshot;
++    bool vertex_snapshots_enabled;
++    uint8_t *vertex_snapshot_scratch;
++    uint64_t vertex_snapshot_draws;
++    uint64_t vertex_snapshot_fallbacks;
++    uint64_t vertex_snapshot_bytes;
+ 
+     MemorySyncRequirement vertex_ram_buffer_syncs[NV2A_VERTEXSHADER_ATTRIBUTES];
+     size_t num_vertex_ram_buffer_syncs;
+@@ -598,4 +607,9 @@
+ void pgraph_vk_determine_gpu_properties(NV2AState *d);
+ GPUProperties *pgraph_vk_get_gpu_properties(void);
+ 
++/* Fix 60 is core-renderer code and has no Debug Tools dependency. */
++bool pgraph_vk_prepare_vertex_snapshot(NV2AState *d);
++void pgraph_vk_invalidate_vertex_snapshot_mirror(NV2AState *d);
++void pgraph_vk_copy_vertex_snapshot(NV2AState *d);
++
+ #endif
+diff --git a/hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h b/hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h
+new file mode 100644
+--- /dev/null
++++ b/hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h
+@@ -0,0 +1,143 @@
++/*
++ * Bounded, append-only vertex snapshots for the NV2A Vulkan renderer.
++ * SPDX-License-Identifier: LGPL-2.0-or-later
++ *
++ * Pure byte/layout helpers: no Vulkan, guest writes, locks, or allocation.
++ * Keep vertex indices unchanged, including gl_VertexIndex. Unused prefixes
++ * are reserved but never read from guest RAM or fetched by the draw.
++ */
++#ifndef HW_XBOX_NV2A_PGRAPH_VK_VERTEX_SNAPSHOT_H
++#define HW_XBOX_NV2A_PGRAPH_VK_VERTEX_SNAPSHOT_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#define NV2A_VK_SNAPSHOT_ATTRS 16
++#define NV2A_VK_SNAPSHOT_LIMIT (8u * 1024u * 1024u)
++#define NV2A_VK_SNAPSHOT_ALIGNMENT 16u
++#define NV2A_VK_SNAPSHOT_PREFIX_LIMIT (64u * 1024u)
++
++typedef struct VertexSnapshotAttribute {
++    uint64_t source;
++    uint32_t stride;
++    uint32_t width;
++    uint32_t location;
++    size_t offset;
++} VertexSnapshotAttribute;
++
++typedef struct VertexSnapshot {
++    bool active;
++    uint32_t first;
++    uint32_t last;
++    uint32_t count;
++    size_t bytes;
++    VertexSnapshotAttribute attributes[NV2A_VK_SNAPSHOT_ATTRS];
++} VertexSnapshot;
++
++/* An unsuccessful plan leaves no partially usable plan behind. */
++static inline bool nv2a_vk_snapshot_plan(
++    VertexSnapshot *out, const VertexSnapshotAttribute *attributes,
++    uint32_t count, uint32_t first, uint32_t last, uint64_t ram_size,
++    size_t capacity)
++{
++    VertexSnapshot plan = { 0 };
++    uint32_t locations = 0;
++    uint64_t useful_bytes = 0;
++    *out = plan;
++    if (!attributes || !count || count > NV2A_VK_SNAPSHOT_ATTRS || first > last ||
++        last == UINT32_MAX || ram_size > SIZE_MAX) {
++        return false;
++    }
++    if (capacity > NV2A_VK_SNAPSHOT_LIMIT) {
++        capacity = NV2A_VK_SNAPSHOT_LIMIT;
++    }
++    for (uint32_t i = 0; i < count; i++) {
++        VertexSnapshotAttribute a = attributes[i];
++        if (!a.width || a.width > 16 || !a.stride ||
++            a.location >= NV2A_VK_SNAPSHOT_ATTRS ||
++            (locations & (1u << a.location)) || a.source > ram_size) {
++            return false;
++        }
++        /* Products fit uint64_t: both factors are uint32_t. */
++        uint64_t last_offset = (uint64_t)last * a.stride;
++        if (last_offset > ram_size - a.source ||
++            a.width > ram_size - a.source - last_offset) {
++            return false;
++        }
++        uint64_t bytes = ((uint64_t)last + 1) * a.width;
++        size_t padding = (NV2A_VK_SNAPSHOT_ALIGNMENT -
++                          plan.bytes % NV2A_VK_SNAPSHOT_ALIGNMENT) %
++                         NV2A_VK_SNAPSHOT_ALIGNMENT;
++        if (plan.bytes > capacity || padding > capacity - plan.bytes ||
++            bytes > capacity - plan.bytes - padding) {
++            return false;
++        }
++        a.offset = plan.bytes + padding;
++        plan.attributes[i] = a;
++        plan.bytes = a.offset + (size_t)bytes;
++        locations |= 1u << a.location;
++        useful_bytes += ((uint64_t)last - first + 1) * a.width;
++    }
++    /* vkCmdCopyBuffer requires a multiple-of-four byte size. Keep the whole
++     * allocation 16-byte aligned, including a final 1/2/3-component attribute. */
++    size_t tail = (NV2A_VK_SNAPSHOT_ALIGNMENT -
++                   plan.bytes % NV2A_VK_SNAPSHOT_ALIGNMENT) %
++                  NV2A_VK_SNAPSHOT_ALIGNMENT;
++    if (tail > capacity - plan.bytes) {
++        return false;
++    }
++    plan.bytes += tail;
++    /* Keep high-base, narrow index ranges on the original path instead of
++     * copying megabytes of unused prefix just to preserve vertex indices. */
++    if (plan.bytes - useful_bytes > NV2A_VK_SNAPSHOT_PREFIX_LIMIT &&
++        plan.bytes > useful_bytes * 4) {
++        return false;
++    }
++    plan.first = first;
++    plan.last = last;
++    plan.count = count;
++    plan.active = true;
++    *out = plan;
++    return true;
++}
++
++static inline bool nv2a_vk_snapshot_space(size_t used, size_t capacity,
++                                          size_t bytes, size_t *start)
++{
++    if (used > capacity) {
++        return false;
++    }
++    size_t padding = (NV2A_VK_SNAPSHOT_ALIGNMENT -
++                      used % NV2A_VK_SNAPSHOT_ALIGNMENT) %
++                     NV2A_VK_SNAPSHOT_ALIGNMENT;
++    if (padding > capacity - used || bytes > capacity - used - padding) {
++        return false;
++    }
++    *start = used + padding;
++    return true;
++}
++
++/* Caller supplies a validated plan and a nonoverlapping destination of bytes
++ * length. Never change an already allocated snapshot, even for identical data.
++ */
++static inline void nv2a_vk_snapshot_copy(const VertexSnapshot *plan,
++                                        const uint8_t *ram, uint8_t *out)
++{
++    size_t vertices = (size_t)plan->last - plan->first + 1;
++    for (uint32_t i = 0; i < plan->count; i++) {
++        const VertexSnapshotAttribute *a = &plan->attributes[i];
++        size_t source = (size_t)a->source + (size_t)plan->first * a->stride;
++        size_t target = a->offset + (size_t)plan->first * a->width;
++        if (a->stride == a->width) {
++            memcpy(out + target, ram + source, vertices * a->width);
++        } else {
++            for (size_t j = 0; j < vertices; j++) {
++                memcpy(out + target + j * a->width,
++                       ram + source + j * a->stride, a->width);
++            }
++        }
++    }
++}
++#endif
+diff --git a/tests/unit/test-nv2a-vk-vertex-snapshot.c b/tests/unit/test-nv2a-vk-vertex-snapshot.c
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test-nv2a-vk-vertex-snapshot.c
+@@ -0,0 +1,89 @@
++/* Byte-oracle tests for Fix 60. SPDX-License-Identifier: LGPL-2.0-or-later */
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h"
++
++/* Do not compile test checks away when testing the production NDEBUG path. */
++#undef assert
++#define assert(x) do { if (!(x)) { fprintf(stderr, "CHECK failed: %s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
++static uint32_t seed = 0x60a31f19;
++static uint32_t rnd(void) { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; }
++int main(void)
++{
++    enum { RAM = 262144, SPACE = 131072 };
++    uint8_t *ram = malloc(RAM), *arena = malloc(SPACE), *oracle = malloc(SPACE);
++    assert(ram && arena && oracle);
++    for (size_t i = 0; i < RAM; i++) ram[i] = (uint8_t)rnd();
++    static const unsigned widths[] = { 1, 2, 3, 4, 6, 8, 12, 16 };
++    for (unsigned trial = 0; trial < 30000; trial++) {
++        VertexSnapshotAttribute a[16] = { 0 };
++        VertexSnapshot p;
++        unsigned n = 1 + rnd() % 16, first = rnd() % 31, last = first + rnd() % 90;
++        for (unsigned j = 0; j < n; j++) {
++            a[j].source = rnd() % (RAM / 2);
++            a[j].stride = 1 + rnd() % 137;
++            a[j].width = widths[rnd() % 8];
++            a[j].location = 15 - j;
++        }
++        size_t limit = 16 + rnd() % (SPACE - 16);
++        size_t required = 0;
++        for (unsigned j = 0; j < n; j++) {
++            required = (required + 15) / 16 * 16;
++            required += (last + 1) * a[j].width;
++        }
++        required = (required + 15) / 16 * 16;
++        bool ok = nv2a_vk_snapshot_plan(&p, a, n, first, last, RAM, limit);
++        assert(ok == (required <= limit));
++        if (!ok) { assert(!p.active && !p.bytes && !p.count); continue; }
++        assert(p.bytes == required && p.bytes % 16 == 0);
++        memset(arena, 0xCD, SPACE); memset(oracle, 0xCD, SPACE);
++        nv2a_vk_snapshot_copy(&p, ram, arena);
++        for (unsigned j = 0; j < n; j++) {
++            assert(p.attributes[j].offset % 16 == 0);
++            for (unsigned v = first; v <= last; v++)
++                for (unsigned b = 0; b < a[j].width; b++)
++                    oracle[p.attributes[j].offset + v * a[j].width + b] =
++                        ram[a[j].source + v * a[j].stride + b];
++        }
++        assert(memcmp(arena, oracle, SPACE) == 0); /* prefixes and canaries unchanged */
++        size_t start = 123, used = rnd() % SPACE;
++        bool fits = nv2a_vk_snapshot_space(used, SPACE, p.bytes, &start);
++        size_t expected = (used + 15) / 16 * 16;
++        assert(fits == (expected + p.bytes <= SPACE));
++        if (fits) assert(start == expected);
++    }
++    VertexSnapshot p;
++    VertexSnapshotAttribute a[2] = {{.source=0,.stride=4,.width=4,.location=0},
++                                  {.source=8,.stride=4,.width=4,.location=1}};
++    assert(!nv2a_vk_snapshot_plan(&p,NULL,1,0,1,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,0,0,1,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,17,0,1,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,2,1,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,0,UINT32_MAX,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,0,UINT32_MAX-1,RAM,SIZE_MAX));
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,65000,65010,RAM,8*1024*1024));
++    a[0].source = UINT64_MAX;
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,0,1,RAM,SPACE));
++    a[0].source=RAM-4;
++    assert(nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,SPACE));
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,0,1,RAM,SPACE));
++    a[0].source=0;a[0].stride=UINT32_MAX;
++    assert(!nv2a_vk_snapshot_plan(&p,a,1,0,UINT32_MAX-1,UINT64_MAX,SIZE_MAX));
++    a[0].stride=0; assert(!nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,SPACE));
++    a[0].stride=4;a[0].width=0; assert(!nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,SPACE));
++    a[0].width=17; assert(!nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,SPACE));
++    a[0].width=3; assert(!nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,3));
++    assert(nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,16) && p.bytes==16);
++    a[0].width=4;a[1].location=0;
++    assert(!nv2a_vk_snapshot_plan(&p,a,2,0,0,RAM,SPACE));
++    a[0].location=16; assert(!nv2a_vk_snapshot_plan(&p,a,1,0,0,RAM,SPACE));
++    size_t start=987;
++    assert(!nv2a_vk_snapshot_space(SIZE_MAX,SIZE_MAX,1,&start));
++    assert(!nv2a_vk_snapshot_space(100,99,0,&start));
++    assert(!nv2a_vk_snapshot_space(SIZE_MAX-8,SIZE_MAX,16,&start));
++    assert(start==987);
++    free(ram);free(arena);free(oracle);
++    puts("PASS: 30000 randomized byte-oracle/layout cases; all widths, unaligned/overlapping strides, sparse locations, nonzero indices, padding, bounds and overflow");
++    return 0;
++}
+diff --git a/tests/unit/test-nv2a-vk-vertex-snapshot.py b/tests/unit/test-nv2a-vk-vertex-snapshot.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test-nv2a-vk-vertex-snapshot.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python3
++"""Compile actual Fix60 planner and renderer helpers against delayed-GPU fixtures.
++This does not run a Vulkan driver or the game. Standard C and stub Vulkan types
++are used. Observation-only calls are removed; separate frozen guards cover them.
++"""
++import argparse
++import pathlib
++import re
++import shlex
++import subprocess
++import tempfile
++
++TOKEN = re.compile(r'/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]')
++def block(source, signature, suffix=''):
++    begin = source.index(signature)
++    depth = 0
++    opened = False
++    for m in TOKEN.finditer(source, begin):
++        if m.group() == '{': depth += 1; opened = True
++        elif m.group() == '}':
++            depth -= 1
++            if opened and depth == 0:
++                end = m.end()
++                if suffix:
++                    end = source.index(suffix, end) + len(suffix)
++                return source[begin:end]
++    raise ValueError('Unterminated block: '+signature)
++
++def helpers(root):
++    # Match the relevant real signedness instead of assuming uint32_t arrays.
++    state_header=(root/'hw/xbox/nv2a/pgraph/pgraph.h').read_text()
++    for declaration in ['unsigned int inline_elements_length;',
++                        'unsigned int draw_arrays_length;',
++                        'int32_t draw_arrays_start[1250];',
++                        'int32_t draw_arrays_count[1250];']:
++        if declaration not in state_header:
++            raise AssertionError('Update fixture to actual member type: '+declaration)
++    v=(root/'hw/xbox/nv2a/pgraph/vk/vertex.c').read_text()
++    d=(root/'hw/xbox/nv2a/pgraph/vk/draw.c').read_text()
++    result=v[v.index('/* Fix 60: immutable per-draw RAM vertices'):]
++    result+='\n#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored "-Wsign-compare"\n#pragma GCC diagnostic ignored "-Wunused-parameter"\n'
++    result+='\n'+block(v,'void pgraph_vk_update_vertex_ram_buffer(')
++    for sig in ['static int compare_memory_sync_requirement_by_addr(',
++                'static void sync_vertex_ram_buffer(',
++                'static void get_size_and_count_for_format(']:
++        result+='\n'+block(d,sig)
++    result+='\n'+block(d,'typedef struct VertexBufferRemap', ';')
++    for sig in ['static VertexBufferRemap remap_unaligned_attributes(',
++                'static void copy_remapped_attributes_to_inline_buffer(',
++                'static void bind_vertex_buffer(']:
++        result+='\n'+block(d,sig)
++    result+='\n#pragma GCC diagnostic pop\n'
++    return re.sub(r'xemu_debug_tools_pgraph_draw_trace_(?:stage_begin|stage_end|metric)\s*\([^;]*\);','',result)
++
++def run(cmd):
++    print('+',' '.join(map(str,cmd)),flush=True)
++    subprocess.run(cmd,check=True,timeout=120)
++
++def main():
++    ap=argparse.ArgumentParser();ap.add_argument('--root',default='.');ap.add_argument('--compiler',default='cc');ap.add_argument('--sanitize',action='store_true');ap.add_argument('--ndebug',action='store_true');ap.add_argument('--negative',action='store_true');a=ap.parse_args()
++    root=pathlib.Path(a.root).resolve();td=root/'tests/unit'
++    # Fixtures are adjacent to this script, independent of the optional Debug Tools.
++    fixture=(td/'nv2a-vk-vertex-snapshot-fixture.h').read_text()
++    test=(td/'nv2a-vk-vertex-snapshot-fixture.c').read_text()
++    code=helpers(root)
++    cc=shlex.split(a.compiler);flags=['-std=gnu11','-Wall','-Wextra','-Werror','-O2','-I',str(root)]
++    if a.sanitize: flags+=['-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer']
++    if a.ndebug: flags+=['-DNDEBUG']
++    with tempfile.TemporaryDirectory(prefix='xemu-fix60-test-') as t:
++        temp=pathlib.Path(t)
++        binary=temp/'planner'
++        run(cc+flags+[str(td/'test-nv2a-vk-vertex-snapshot.c'),'-o',str(binary)]);run([str(binary)])
++        source=temp/'integration.c';source.write_text(fixture+'\n'+code+'\n'+test)
++        binary=temp/'integration'
++        run(cc+flags+[str(source),'-o',str(binary)]);run([str(binary)])
++        lifecycle = (root/'hw/xbox/nv2a/pgraph/vk/buffer.c').read_text()
++        lifecycle = lifecycle.replace('#include "renderer.h"', '')
++        lc_source = temp/'lifecycle.c'
++        lc_source.write_text((td/'nv2a-vk-vertex-snapshot-lifecycle.h').read_text()+
++                             '\n#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored "-Wsign-compare"\n' +
++                             '#pragma GCC diagnostic ignored "-Wunused-but-set-variable"\n'+
++                             lifecycle+'\n#pragma GCC diagnostic pop\n'+
++                             (td/'nv2a-vk-vertex-snapshot-lifecycle.c').read_text())
++        lc_binary = temp/'lifecycle'
++        run(cc+flags+[str(lc_source),'-o',str(lc_binary)]);run([str(lc_binary)])
++        if a.negative:
++            mutants={
++                'discard previous arena versions':code.replace('    memcpy(buffer->mapped + start, r->vertex_snapshot_scratch, plan->bytes);','    start = 0;\n    memcpy(buffer->mapped + start, r->vertex_snapshot_scratch, plan->bytes);'),
++                'read guest bytes too late':code.replace('    memcpy(buffer->mapped + start, r->vertex_snapshot_scratch, plan->bytes);','    nv2a_vk_snapshot_copy(plan, d->vram_ptr, buffer->mapped + start);'),
++                'trust stale dirty flag on fallback':code.replace('        pgraph_vk_invalidate_vertex_snapshot_mirror(d);', ''),
++                'omit noncoherent flush':code.replace('VK_CHECK(vmaFlushAllocation(r->allocator, buffer->allocation, start, plan->bytes));','(void)vmaFlushAllocation;'),
++            }
++            for name,mutant in mutants.items():
++                if mutant==code: raise AssertionError('no mutation: '+name)
++                source.write_text(fixture+'\n'+mutant+'\n'+test)
++                run(cc+flags+[str(source),'-o',str(binary)])
++                p=subprocess.run([str(binary)],capture_output=True,timeout=120)
++                if p.returncode==0: raise AssertionError('unsafe mutant accepted: '+name)
++                print('PASS: rejected unsafe negative control:',name,flush=True)
++    return 0
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/tests/unit/nv2a-vk-vertex-snapshot-fixture.h b/tests/unit/nv2a-vk-vertex-snapshot-fixture.h
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/nv2a-vk-vertex-snapshot-fixture.h
+@@ -0,0 +1,97 @@
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <inttypes.h>
++#include "hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h"
++#define CHECK(x) do { if(!(x)){fprintf(stderr,"CHECK:%d:%s\n",__LINE__,#x);abort();}}while(0)
++#define MIN(a,b) ((a)<(b)?(a):(b))
++#define MAX(a,b) ((a)>(b)?(a):(b))
++#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
++#define ROUND_UP(n,a) (((n)+(a)-1)/(a)*(a))
++#define TARGET_PAGE_SIZE 4096
++#define TARGET_PAGE_MASK (~(uint64_t)4095)
++#define TARGET_PAGE_ALIGN(n) ROUND_UP(n,4096)
++#define NV2A_VERTEXSHADER_ATTRIBUTES 16
++#define NV2A_VK_DGROUP_BEGIN(...) ((void)0)
++#define NV2A_VK_DGROUP_END(...) ((void)0)
++#define NV2A_VK_DPRINTF(...) ((void)0)
++#define DIRTY_MEMORY_NV2A 1
++#define HWADDR_PRIx PRIx64
++#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
++#define VK_CHECK(x) CHECK((x)==0)
++#define NV2A_PROF_GEOM_BUFFER_UPDATE_1 1
++#define NV2A_PROF_GEOM_BUFFER_UPDATE_3 3
++#define VK_VERTEX_INPUT_RATE_VERTEX 0
++#define VK_FINISH_REASON_VERTEX_BUFFER_DIRTY 1
++#define VK_FINISH_REASON_NEED_BUFFER_SPACE 2
++#define BUFFER_VERTEX_RAM 0
++#define BUFFER_VERTEX_INLINE_STAGING 1
++#define BUFFER_VERTEX_INLINE 2
++#define BUFFER_COUNT 3
++#define RAM_SIZE (256*1024)
++#define ARENA_SIZE (64*1024)
++typedef uint64_t hwaddr,VkDeviceSize,VkDeviceAddress;
++typedef int VkBuffer;
++typedef enum VkFormat {
++ VK_FORMAT_R8_UNORM=1,VK_FORMAT_R8G8_UNORM,VK_FORMAT_R8G8B8_UNORM,VK_FORMAT_R8G8B8A8_UNORM,
++ VK_FORMAT_R16_SNORM,VK_FORMAT_R16G16_SNORM,VK_FORMAT_R16G16B16_SNORM,VK_FORMAT_R16G16B16A16_SNORM,
++ VK_FORMAT_R16_SSCALED,VK_FORMAT_R16G16_SSCALED,VK_FORMAT_R16G16B16_SSCALED,VK_FORMAT_R16G16B16A16_SSCALED,
++ VK_FORMAT_R32_SFLOAT,VK_FORMAT_R32G32_SFLOAT,VK_FORMAT_R32G32B32_SFLOAT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_FORMAT_R32_SINT
++} VkFormat;
++typedef struct {uint32_t location,binding;VkFormat format;uint32_t offset;} VkVertexInputAttributeDescription;
++typedef struct {uint32_t binding,stride,inputRate;} VkVertexInputBindingDescription;
++typedef struct {hwaddr addr,size;} MemorySyncRequirement;
++typedef struct {size_t buffer_offset,buffer_size;uint8_t *mapped;int allocation;VkBuffer buffer;} StorageBuffer;
++typedef struct PGRAPHVkState {
++ StorageBuffer storage_buffers[3];
++ VertexSnapshot vertex_snapshot;bool vertex_snapshots_enabled;uint8_t *vertex_snapshot_scratch;
++ uint64_t vertex_snapshot_draws,vertex_snapshot_fallbacks,vertex_snapshot_bytes;
++ VkVertexInputBindingDescription vertex_binding_descriptions[16];
++ VkVertexInputAttributeDescription vertex_attribute_descriptions[16];
++ int vertex_attribute_to_description_location[16];
++ int num_active_vertex_binding_descriptions,num_active_vertex_attribute_descriptions;
++ hwaddr vertex_attribute_offsets[16];MemorySyncRequirement vertex_ram_buffer_syncs[16];size_t num_vertex_ram_buffer_syncs;
++ unsigned long *uploaded_bitmap;size_t bitmap_size;int allocator,command_buffer;bool in_command_buffer;
++} PGRAPHVkState;
++typedef struct PGRAPHState {PGRAPHVkState *vk_renderer_state;unsigned int draw_arrays_length,inline_elements_length;
++ int32_t draw_arrays_start[16],draw_arrays_count[16];uint32_t inline_elements[256];}PGRAPHState;
++typedef struct NV2AState {PGRAPHState pgraph;uint8_t *vram_ptr;void *vram;}NV2AState;
++static NV2AState d;static PGRAPHVkState state;
++static uint8_t ram[RAM_SIZE],mirror[RAM_SIZE],staging[ARENA_SIZE],gpu[ARENA_SIZE];
++static unsigned long uploaded[RAM_SIZE/4096];
++static unsigned downloads,finishes,vertex_finishes,space_finishes,dirty_checks,copies,flushes;
++static bool dirty=true,surface_mutates,refuse_reclaim;
++static size_t flushed_end;
++static uint64_t memory_region_size(void *v){(void)v;return RAM_SIZE;}
++static bool memory_region_test_and_clear_dirty(void*v,hwaddr a,VkDeviceSize n,int client){(void)v;(void)a;(void)n;(void)client;dirty_checks++;bool old=dirty;dirty=false;return old;}
++static void memory_region_set_client_dirty(void*v,hwaddr a,hwaddr n,int client){(void)v;CHECK(a<=RAM_SIZE&&n<=RAM_SIZE-a&&client==DIRTY_MEMORY_NV2A);dirty=true;}
++static void nv2a_profile_inc_counter(int n){(void)n;copies++;}
++static void bitmap_set(unsigned long*b,size_t a,size_t n){CHECK(a+n<=RAM_SIZE/4096);for(size_t i=a;i<a+n;i++)b[i]=1;}
++static size_t find_next_bit(unsigned long*b,size_t end,size_t first){CHECK(end<=RAM_SIZE/4096);for(size_t i=first;i<end;i++)if(b[i])return i;return end;}
++static void pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState*pg,hwaddr a,hwaddr n){(void)pg;CHECK(a+n<=RAM_SIZE);downloads++;if(surface_mutates){ram[a+1]^=0x5a;surface_mutates=false;}}
++static int vmaFlushAllocation(int allocator,int allocation,size_t a,size_t n){(void)allocator;(void)allocation;CHECK(a+n<=ARENA_SIZE);flushed_end=MAX(flushed_end,a+n);flushes++;return 0;}
++/* A delayed draw records attributes, binding offsets and expected bytes. Only
++ * finish executes it; this detects in-place overwrites of earlier versions. */
++typedef struct Pending {int count;uint32_t first,last;VkBuffer buffers[16];VkDeviceSize offsets[16];uint32_t widths[16],strides[16];uint8_t expected[16][128][16];}Pending;
++static Pending pending[200];static size_t npending;
++static VkBuffer last_buffers[16];static VkDeviceSize last_offsets[16];static unsigned last_count;
++static void vkCmdBindVertexBuffers(int cmd,uint32_t first,uint32_t n,const VkBuffer*b,const VkDeviceSize*o){(void)cmd;CHECK(first==0&&n<=16);last_count=n;memcpy(last_buffers,b,n*sizeof(*b));memcpy(last_offsets,o,n*sizeof(*o));}
++static void execute(void){
++ CHECK(state.storage_buffers[1].buffer_offset<=ARENA_SIZE);
++ if(state.storage_buffers[1].buffer_offset)memcpy(gpu,staging,state.storage_buffers[1].buffer_offset);
++ for(size_t i=0;i<npending;i++)for(int a=0;a<pending[i].count;a++)for(uint32_t v=pending[i].first;v<=pending[i].last;v++){
++  const uint8_t*base=pending[i].buffers[a]==2?gpu:mirror;
++  size_t cap=pending[i].buffers[a]==2?ARENA_SIZE:RAM_SIZE;
++  size_t pos=(size_t)pending[i].offsets[a]+(size_t)v*pending[i].strides[a];
++  CHECK(pos+pending[i].widths[a]<=cap);
++  CHECK(!memcmp(base+pos,pending[i].expected[a][v-pending[i].first],pending[i].widths[a]));
++ }
++ npending=0;
++}
++static void pgraph_vk_finish(PGRAPHState*pg,int reason){(void)pg;execute();finishes++;if(reason==1)vertex_finishes++;if(reason==2)space_finishes++;if(!refuse_reclaim)state.storage_buffers[1].buffer_offset=0;memset(uploaded,0,sizeof(uploaded));flushed_end=0;state.in_command_buffer=false;}
++static bool pgraph_vk_buffer_has_space_for(PGRAPHState*pg,int index,VkDeviceSize n,VkDeviceAddress a){StorageBuffer*b=&pg->vk_renderer_state->storage_buffers[index];return ROUND_UP(b->buffer_offset,a)+n<=b->buffer_size;}
++static bool ensure_buffer_space(PGRAPHState*pg,int index,VkDeviceSize n){if(!pgraph_vk_buffer_has_space_for(pg,index,n,1)){pgraph_vk_finish(pg,2);return true;}return false;}
+diff --git a/tests/unit/nv2a-vk-vertex-snapshot-fixture.c b/tests/unit/nv2a-vk-vertex-snapshot-fixture.c
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/nv2a-vk-vertex-snapshot-fixture.c
+@@ -0,0 +1,118 @@
++static uint32_t seed=0x60baddad;
++static uint32_t rnd(void){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return seed;}
++static void reset(void){
++ memset(&d,0,sizeof(d));memset(&state,0,sizeof(state));memset(uploaded,0,sizeof(uploaded));
++ d.pgraph.vk_renderer_state=&state;d.vram_ptr=ram;d.vram=ram;
++ state.vertex_snapshots_enabled=true;state.vertex_snapshot_scratch=calloc(1,NV2A_VK_SNAPSHOT_LIMIT);CHECK(state.vertex_snapshot_scratch);
++ state.storage_buffers[0]=(StorageBuffer){.mapped=mirror,.buffer_size=RAM_SIZE,.buffer=0};
++ state.storage_buffers[1]=(StorageBuffer){.mapped=staging,.buffer_size=ARENA_SIZE,.buffer=1};
++ state.storage_buffers[2]=(StorageBuffer){.mapped=gpu,.buffer_size=ARENA_SIZE,.buffer=2};
++ state.uploaded_bitmap=uploaded;state.bitmap_size=RAM_SIZE/4096;npending=0;
++ downloads=finishes=vertex_finishes=space_finishes=dirty_checks=copies=flushes=0;dirty=true;surface_mutates=false;refuse_reclaim=false;
++ for(size_t i=0;i<RAM_SIZE;i++){ram[i]=(uint8_t)rnd();}
++ memset(mirror,0,sizeof(mirror));
++}
++static void setup(unsigned first,unsigned last,unsigned n,bool indexed){
++ d.pgraph.draw_arrays_length=indexed?0:2;d.pgraph.inline_elements_length=indexed?3:0;
++ d.pgraph.inline_elements[0]=last;d.pgraph.inline_elements[1]=first;d.pgraph.inline_elements[2]=(first+last)/2;
++ unsigned half=(last-first+1)/2;
++ if(!half){d.pgraph.draw_arrays_length=indexed?0:1;half=last-first+1;}
++ d.pgraph.draw_arrays_start[0]=first;d.pgraph.draw_arrays_count[0]=half;
++ d.pgraph.draw_arrays_start[1]=first+half;d.pgraph.draw_arrays_count[1]=last-first+1-half;
++ state.num_active_vertex_binding_descriptions=(int)n;state.num_active_vertex_attribute_descriptions=(int)n;
++ state.num_vertex_ram_buffer_syncs=n;
++ for(unsigned i=0;i<16;i++)state.vertex_attribute_to_description_location[i]=-1;
++ for(unsigned i=0;i<n;i++){
++  unsigned loc=15-i, stride=32+(rnd()%2)*4;VkFormat fmt=(VkFormat)(1+rnd()%17);
++  state.vertex_attribute_to_description_location[loc]=(int)i;
++  state.vertex_attribute_offsets[loc]=4096+17*i; /* deliberately unaligned/interleaved */
++  state.vertex_attribute_descriptions[i]=(VkVertexInputAttributeDescription){.location=loc,.binding=i,.format=fmt};
++  state.vertex_binding_descriptions[i]=(VkVertexInputBindingDescription){.binding=i,.stride=stride};
++  state.vertex_ram_buffer_syncs[i]=(MemorySyncRequirement){state.vertex_attribute_offsets[loc]+first*stride,(last-first+1)*stride};
++ }
++}
++static Pending expected(unsigned first,unsigned last){
++ Pending p={0};p.count=state.num_active_vertex_binding_descriptions;p.first=first;p.last=last;CHECK(last-first<128);
++ for(int i=0;i<p.count;i++){
++  uint32_t loc=state.vertex_attribute_descriptions[i].location;
++  uint32_t width=vertex_snapshot_format_width(state.vertex_attribute_descriptions[i].format);
++  const VertexSnapshotAttribute*a=state.vertex_snapshot.active?&state.vertex_snapshot.attributes[i]:NULL;
++  size_t source=a?(size_t)a->source:(size_t)state.vertex_attribute_offsets[loc];
++  size_t stride=a?a->stride:state.vertex_binding_descriptions[i].stride;
++  p.widths[i]=width;
++  for(unsigned v=first;v<=last;v++)memcpy(p.expected[i][v-first],ram+source+v*stride,width);
++ }
++ return p;
++}
++static void queue_draw(Pending p,VertexBufferRemap map,unsigned last){
++ state.in_command_buffer=true;
++ copy_remapped_attributes_to_inline_buffer(&d.pgraph,map,0,last+1);
++ bind_vertex_buffer(&d.pgraph,map.attributes,0);
++ CHECK(last_count==(unsigned)p.count);CHECK(npending<200);
++ for(int i=0;i<p.count;i++){p.buffers[i]=last_buffers[i];p.offsets[i]=last_offsets[i];p.strides[i]=state.vertex_binding_descriptions[i].stride;}
++ pending[npending++]=p;
++}
++int main(void){
++ reset();
++ for(unsigned i=0;i<4000;i++){
++  unsigned first=rnd()%12,last=first+1+rnd()%70,n=1+rnd()%16;
++  setup(first,last,n,i%2);dirty=true;if(i%59==0)surface_mutates=true;
++  unsigned before=dirty_checks;
++  sync_vertex_ram_buffer(&d.pgraph);CHECK(state.vertex_snapshot.active);CHECK(dirty_checks==before);
++  Pending p=expected(first,last);
++  VertexBufferRemap map=remap_unaligned_attributes(&d.pgraph,last+1);CHECK(map.attributes==UINT16_MAX);
++  /* A descriptor/framebuffer helper may finish before the actual upload. */
++  if(i%83==0)pgraph_vk_finish(&d.pgraph,3);
++  memset(ram+4096,(uint8_t)i,8192); /* new guest version AFTER captured bytes */
++  queue_draw(p,map,last);
++  CHECK(state.storage_buffers[1].buffer_offset%16==0);
++  CHECK(flushed_end>=state.storage_buffers[1].buffer_offset);
++ }
++ execute();CHECK(state.vertex_snapshot_draws==4000);CHECK(!vertex_finishes);CHECK(space_finishes>0);CHECK(flushes==4000);
++ printf("PASS: 4000 actual-helper array/indexed draws, delayed execution, retained old bytes, surface readback, arena wraps=%u, descriptor-triggered finishes, explicit flushes; zero vertex-dirty finishes\n",space_finishes);
++ /* A final unsupported draw must force a refresh of a stale RAM mirror even
++  * after another dirty-client consumer cleared the bit. */
++ setup(0,1,1,false);state.storage_buffers[1].buffer_size=16;dirty=false;
++ state.vertex_attribute_offsets[15]=4096;state.vertex_binding_descriptions[0].stride=16;
++ state.vertex_attribute_descriptions[0].format=VK_FORMAT_R32G32B32A32_SFLOAT;
++ state.vertex_ram_buffer_syncs[0]=(MemorySyncRequirement){4096,32};
++ memset(mirror+4096,0x19,4096);memset(ram+4096,0xA4,4096);bitmap_set(uploaded,1,1);
++ unsigned waits=vertex_finishes;
++ sync_vertex_ram_buffer(&d.pgraph);CHECK(!state.vertex_snapshot.active);CHECK(!memcmp(mirror+4096,ram+4096,4096));CHECK(vertex_finishes==waits+1);
++ /* Environment-off field restores stock dirty predicate: no forced upload. */
++ state.vertex_snapshots_enabled=false;state.num_vertex_ram_buffer_syncs=1;dirty=false;
++ memset(mirror+4096,0x19,4096);unsigned dc=dirty_checks,dp=downloads;
++ sync_vertex_ram_buffer(&d.pgraph);CHECK(mirror[4096]==0x19&&dirty_checks==dc+1&&downloads==dp);
++ state.num_vertex_ram_buffer_syncs=1;dirty=true;
++ sync_vertex_ram_buffer(&d.pgraph);CHECK(!memcmp(mirror+4096,ram+4096,4096));
++ puts("PASS: enabled fallback refreshes stale mirror, keeps overlap finish; disabled path preserves stock dirty behavior");
++ state.vertex_snapshots_enabled=true;state.storage_buffers[1].buffer_size=ARENA_SIZE;
++ setup(0,2,1,false);state.vertex_attribute_descriptions[0].format=VK_FORMAT_R32_SFLOAT;
++ d.pgraph.draw_arrays_start[0]=-1;dp=downloads;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ d.pgraph.draw_arrays_start[0]=0;d.pgraph.draw_arrays_count[0]=-1;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ d.pgraph.draw_arrays_length=17;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);d.pgraph.inline_elements_length=257;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);state.vertex_attribute_descriptions[0].format=(VkFormat)999;
++ dp=downloads;CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);state.vertex_attribute_offsets[15]=RAM_SIZE-1;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);state.vertex_attribute_descriptions[0].binding=15;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);state.vertex_ram_buffer_syncs[0].addr=UINT64_MAX;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(downloads==dp);
++ setup(0,2,1,true);state.storage_buffers[1].buffer_offset=ARENA_SIZE;refuse_reclaim=true;
++ uint32_t old_stride=state.vertex_binding_descriptions[0].stride;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));CHECK(!state.vertex_snapshot.active&&state.vertex_binding_descriptions[0].stride==old_stride);
++ refuse_reclaim=false;state.storage_buffers[1].buffer_offset=0;
++ setup(0,2,1,true);uint8_t*scratch=state.vertex_snapshot_scratch;state.vertex_snapshot_scratch=NULL;
++ CHECK(!pgraph_vk_prepare_vertex_snapshot(&d));state.vertex_snapshot_scratch=scratch;
++ /* The additional fallback invalidation does not walk a corrupted count. */
++ state.num_vertex_ram_buffer_syncs=ARRAY_SIZE(state.vertex_ram_buffer_syncs)+1;
++ pgraph_vk_invalidate_vertex_snapshot_mirror(&d);
++ puts("PASS: unknown format, invalid source/bindings/ranges, unavailable scratch and non-reclaiming arena reject without partial stride plan");
++ free(state.vertex_snapshot_scratch);return 0;
++}
+diff --git a/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.h b/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.h
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.h
+@@ -0,0 +1,55 @@
++/* Dependency fixtures for actual buffer.c init/finalize, not a Vulkan driver. */
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <inttypes.h>
++#include "hw/xbox/nv2a/pgraph/vk/vertex-snapshot.h"
++#define CHECK(x) do{if(!(x)){fprintf(stderr,"CHECK:%d:%s\n",__LINE__,#x);abort();}}while(0)
++#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
++#define ROUND_UP(n,a) (((n)+(a)-1)/(a)*(a))
++#define VK_CHECK(x) CHECK((x)==0)
++#define NV2A_VERTEXSHADER_ATTRIBUTES 16
++#define NV2A_MAX_BATCH_LENGTH 0x7ffff
++#define VK_NULL_HANDLE 0
++#define VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO 1
++#define VK_SHARING_MODE_EXCLUSIVE 0
++#define VMA_MEMORY_USAGE_AUTO_PREFER_HOST 1
++#define VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE 2
++#define VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT 1
++#define VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT 2
++#define VK_BUFFER_USAGE_TRANSFER_DST_BIT 1
++#define VK_BUFFER_USAGE_TRANSFER_SRC_BIT 2
++#define VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 4
++#define VK_BUFFER_USAGE_VERTEX_BUFFER_BIT 8
++#define VK_BUFFER_USAGE_INDEX_BUFFER_BIT 16
++#define VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT 32
++typedef uint64_t VkDeviceSize,VkDeviceAddress;
++typedef int VkBuffer,VmaAllocation;
++typedef struct{int usage,flags;}VmaAllocationCreateInfo;
++typedef struct{int sType;size_t size;int usage,sharingMode;}VkBufferCreateInfo;
++enum {BUFFER_STAGING_DST,BUFFER_STAGING_SRC,BUFFER_COMPUTE_DST,BUFFER_COMPUTE_SRC,
++BUFFER_INDEX,BUFFER_INDEX_STAGING,BUFFER_VERTEX_RAM,BUFFER_VERTEX_INLINE,
++BUFFER_VERTEX_INLINE_STAGING,BUFFER_UNIFORM,BUFFER_UNIFORM_STAGING,BUFFER_COUNT};
++typedef struct{VkBuffer buffer;int usage;VmaAllocationCreateInfo alloc_info;
++ VmaAllocation allocation;int properties;size_t buffer_offset,buffer_size;uint8_t*mapped;}StorageBuffer;
++typedef struct{StorageBuffer storage_buffers[BUFFER_COUNT];VertexSnapshot vertex_snapshot;
++ bool vertex_snapshots_enabled;uint8_t*vertex_snapshot_scratch;
++ uint64_t vertex_snapshot_draws,vertex_snapshot_fallbacks,vertex_snapshot_bytes;
++ int allocator;unsigned long*uploaded_bitmap;size_t bitmap_size;}PGRAPHVkState;
++typedef struct{PGRAPHVkState*vk_renderer_state;uint32_t inline_elements[64];}PGRAPHState;
++typedef struct{PGRAPHState pgraph;void*vram;}NV2AState;
++static int fail_scratch,created,destroyed,mapped,unmapped,next_handle;
++static void*allocations[256];static void*live_scratch;
++static void*g_try_malloc0(size_t n){CHECK(n==NV2A_VK_SNAPSHOT_LIMIT);CHECK(!live_scratch);if(fail_scratch)return NULL;live_scratch=calloc(1,n);CHECK(live_scratch);return live_scratch;}
++static void g_free(void*p){if(p==live_scratch)live_scratch=NULL;free(p);}
++static unsigned long*bitmap_new(size_t n){return calloc(n,sizeof(unsigned long));}
++static void bitmap_clear(unsigned long*p,size_t a,size_t n){memset(p+a,0,n*sizeof(*p));}
++static uint64_t memory_region_size(void*p){(void)p;return 65536;}
++static int vmaCreateBuffer(int a,const VkBufferCreateInfo*b,const VmaAllocationCreateInfo*c,VkBuffer*d,VmaAllocation*e,void*f){(void)a;(void)c;(void)f;CHECK(b->size>0);*d=*e=++next_handle;created++;return 0;}
++static void vmaDestroyBuffer(int a,VkBuffer b,VmaAllocation c){(void)a;CHECK(b==c&&b);destroyed++;}
++static int vmaMapMemory(int a,VmaAllocation b,void**c){(void)a;CHECK(b>0&&b<256&&!allocations[b]);*c=allocations[b]=calloc(1,64);CHECK(*c);mapped++;return 0;}
++static void vmaUnmapMemory(int a,VmaAllocation b){(void)a;CHECK(allocations[b]);free(allocations[b]);allocations[b]=NULL;unmapped++;}
+diff --git a/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.c b/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.c
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/nv2a-vk-vertex-snapshot-lifecycle.c
+@@ -0,0 +1,20 @@
++int main(void){
++ NV2AState d={0};PGRAPHVkState r={0};d.pgraph.vk_renderer_state=&r;
++ for(unsigned test=0;test<5;test++){
++  if(test==0)unsetenv("XEMU_VK_VERTEX_SNAPSHOTS");
++  else if(test==1)setenv("XEMU_VK_VERTEX_SNAPSHOTS","0",1);
++  else setenv("XEMU_VK_VERTEX_SNAPSHOTS","1",1);
++  fail_scratch=test==3;
++  pgraph_vk_init_buffers(&d);
++  CHECK(r.vertex_snapshots_enabled==(test!=1&&test!=3));
++  CHECK(!!r.vertex_snapshot_scratch==r.vertex_snapshots_enabled);
++  CHECK(!r.vertex_snapshot.active&&!r.vertex_snapshot_draws&&!r.vertex_snapshot_bytes);
++  CHECK(created==(int)(test+1)*BUFFER_COUNT&&mapped==(int)(test+1)*4);
++  if(r.vertex_snapshot_scratch){CHECK(!r.vertex_snapshot_scratch[0]);CHECK(!r.vertex_snapshot_scratch[NV2A_VK_SNAPSHOT_LIMIT-1]);}
++  pgraph_vk_finalize_buffers(&d);
++  CHECK(!live_scratch&&!r.vertex_snapshot_scratch&&!r.vertex_snapshot.active);
++  CHECK(destroyed==created&&unmapped==mapped&&!r.uploaded_bitmap);
++ }
++ puts("PASS: actual buffer.c init/finalize: default enabled, explicit off/on, allocation-failure stock fallback, repeated renderer lifecycle, zero scratch leaks");
++ return 0;
++}

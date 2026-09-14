@@ -1,8 +1,8 @@
 diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
-index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740af4b407e 100644
+index d93cd17..0753fcf 100644
 --- a/accel/tcg/cpu-exec.c
 +++ b/accel/tcg/cpu-exec.c
-@@ -47,6 +47,11 @@
+@@ -47,6 +47,12 @@
  #include "tb-context.h"
  #include "tb-internal.h"
  #include "internal-common.h"
@@ -11,10 +11,11 @@ index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740
 +#include "../../ui/xui/debug-tools/addons/diagnostics/guest-timer-deadline-trace.h"
 +#include "../../ui/xui/debug-tools/addons/diagnostics/ptimer-irq-delivery-trace.h"
 +#include "../../ui/xui/debug-tools/addons/diagnostics/host-stall-trace.h"
++#include "../../ui/xui/debug-tools/addons/diagnostics/pgraph-flip-delay-trace-hook.h"
  
  /* -icount align implementation. */
  
-@@ -801,6 +806,15 @@ static inline bool icount_exit_request(CPUState *cpu)
+@@ -801,6 +807,15 @@ static inline bool icount_exit_request(CPUState *cpu)
  static inline bool cpu_handle_interrupt(CPUState *cpu,
                                          TranslationBlock **last_tb)
  {
@@ -30,7 +31,7 @@ index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740
      /*
       * If we have requested custom cflags with CF_NOIRQ we should
       * skip checking here. Any pending interrupts will get picked up
-@@ -985,6 +999,27 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+@@ -985,6 +1000,29 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  break;
              }
  
@@ -42,6 +43,8 @@ index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740
 +            const bool guest_timer_deadline_single_step =
 +                unlikely(xemu_debug_tools_guest_timer_deadline_trace_should_single_step(
 +                    (uint32_t)s.pc));
++            const bool pgraph_flip_delay_guest_pc_sample_active =
++                unlikely(xemu_debug_tools_pgraph_flip_delay_guest_pc_sampler_active());
 +            if (guest_input_profile_active || guest_input_consumer_capture_active) {
 +                s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
 +                last_tb = NULL;
@@ -58,7 +61,7 @@ index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740
              tb = tb_lookup(cpu, s);
              if (tb == NULL) {
                  CPUJumpCache *jc;
-@@ -1020,6 +1055,17 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+@@ -1020,6 +1058,20 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  tb_add_jump(last_tb, tb_exit, tb);
              }
  
@@ -73,11 +76,14 @@ index d93cd1734d20aa78732e4720a4bf6fa0a19dbeff..c209e6a5c31f5b7bf9d49272225d8740
 +                xemu_debug_tools_guest_timer_deadline_trace_note_pc(
 +                    cpu, (uint32_t)s.pc);
 +            }
++            if (pgraph_flip_delay_guest_pc_sample_active) {
++                xemu_debug_tools_pgraph_flip_delay_note_guest_pc((uint32_t)s.pc);
++            }
              cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
  
              /* Try to align the host and virtual clocks
 diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
-index b9ae474bf855a5afbeb127507490b938a8f2d693..30420ce5b2ce3b835e0a10edc73c394aa46c3dab 100644
+index b9ae474..30420ce 100644
 --- a/accel/tcg/cputlb.c
 +++ b/accel/tcg/cputlb.c
 @@ -52,6 +52,7 @@
@@ -173,7 +179,7 @@ index b9ae474bf855a5afbeb127507490b938a8f2d693..30420ce5b2ce3b835e0a10edc73c394a
  
  /*
 diff --git a/build.sh b/build.sh
-index 312f36c4f56b32f8341c594da9062704df0bb99a..8e3dd6318a7f948072c051889a6dd7ff95a90c47 100755
+index 312f36c..8e3dd63 100755
 --- a/build.sh
 +++ b/build.sh
 @@ -5,6 +5,7 @@ set -o pipefail # Will return the exit status of make if it fails
@@ -185,7 +191,7 @@ index 312f36c4f56b32f8341c594da9062704df0bb99a..8e3dd6318a7f948072c051889a6dd7ff
  target_arch=$(uname -m)
  
 diff --git a/config_spec.yml b/config_spec.yml
-index c933b54daf58f9c49d59665aecc14d662ce682ed..74e5b8b4ac008dc480a32f5fcc1c23858d6e36fd 100644
+index c933b54..74e5b8b 100644
 --- a/config_spec.yml
 +++ b/config_spec.yml
 @@ -7,6 +7,23 @@ general:
@@ -251,7 +257,7 @@ index c933b54daf58f9c49d59665aecc14d662ce682ed..74e5b8b4ac008dc480a32f5fcc1c2385
  
  perf:
 diff --git a/debian/control b/debian/control
-index 3f58074a74cbbcc865c6d7e21b108d8f9d754208..e9821fa102559f2f30b44c66385d47106bf505bf 100644
+index 3f58074..e9821fa 100644
 --- a/debian/control
 +++ b/debian/control
 @@ -23,6 +23,11 @@ Build-Depends: debhelper (>= 11),
@@ -267,7 +273,7 @@ index 3f58074a74cbbcc865c6d7e21b108d8f9d754208..e9821fa102559f2f30b44c66385d4710
  Homepage: https://xemu.app
  XS-Debian-Vcs-Browser: https://github.com/mborgerson/xemu
 diff --git a/hw/i386/x86-cpu.c b/hw/i386/x86-cpu.c
-index a26055f5b938c10ceddb8d20b374b621a0a27ff5..b39e06f02abc2fea0ae99a95d4c41a49de7019fd 100644
+index a26055f..b39e06f 100644
 --- a/hw/i386/x86-cpu.c
 +++ b/hw/i386/x86-cpu.c
 @@ -30,6 +30,7 @@
@@ -307,8 +313,146 @@ index a26055f5b938c10ceddb8d20b374b621a0a27ff5..b39e06f02abc2fea0ae99a95d4c41a49
  }
  
  qemu_irq x86_allocate_cpu_irq(void)
+diff --git a/hw/ide/atapi.c b/hw/ide/atapi.c
+--- a/hw/ide/atapi.c
++++ b/hw/ide/atapi.c
+@@ -30,6 +30,8 @@
+ #include "scsi/constants.h"
+ #include "ide-internal.h"
+ #include "trace.h"
++#include "../../ui/xui/debug-tools/addons/file-replace/file-replace-disc-overlay.h"
++#include "../../ui/xui/debug-tools/addons/file-replace/file-replace-block.h"
+ 
+ #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
+ #define ATAPI_SECTOR_SIZE (1 << ATAPI_SECTOR_BITS)
+@@ -99,11 +101,11 @@
+ 
+     switch (s->cd_sector_size) {
+     case 2048:
+-        ret = blk_pread(s->blk, (int64_t)s->lba << ATAPI_SECTOR_BITS,
++        ret = xemu_file_replace_pread(s->blk, (int64_t)s->lba << ATAPI_SECTOR_BITS,
+                         ATAPI_SECTOR_SIZE, s->io_buffer, 0);
+         break;
+     case 2352:
+-        ret = blk_pread(s->blk, (int64_t)s->lba << ATAPI_SECTOR_BITS,
++        ret = xemu_file_replace_pread(s->blk, (int64_t)s->lba << ATAPI_SECTOR_BITS,
+                         ATAPI_SECTOR_SIZE, s->io_buffer + 16, 0);
+         if (ret >= 0) {
+             cd_data_to_raw(s->io_buffer, s->lba);
+@@ -138,6 +140,7 @@
+     }
+ 
+     block_acct_done(blk_get_stats(s->blk), &s->acct);
++
+ 
+     if (s->cd_sector_size == 2352) {
+         cd_data_to_raw(s->io_buffer, s->lba);
+@@ -324,7 +327,7 @@
+ static void ide_atapi_cmd_read_pio(IDEState *s, int lba, int nb_sectors,
+                                    int sector_size)
+ {
+-    assert(0 <= lba && lba < (s->nb_sectors >> 2));
++    assert(0 <= lba && lba < (xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2)));
+ 
+     s->lba = lba;
+     s->packet_transfer_size = nb_sectors * sector_size;
+@@ -424,7 +427,7 @@
+ static void ide_atapi_cmd_read_dma(IDEState *s, int lba, int nb_sectors,
+                                    int sector_size)
+ {
+-    assert(0 <= lba && lba < (s->nb_sectors >> 2));
++    assert(0 <= lba && lba < (xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2)));
+ 
+     s->lba = lba;
+     s->packet_transfer_size = nb_sectors * sector_size;
+@@ -491,7 +494,7 @@
+                 if (layer != 0)
+                     return -ASC_INV_FIELD_IN_CMD_PACKET;
+ 
+-                total_sectors = s->nb_sectors >> 2;
++                total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+                 if (total_sectors == 0) {
+                     return -ASC_MEDIUM_NOT_PRESENT;
+                 }
+@@ -982,7 +985,7 @@
+     unsigned int nb_sectors, lba;
+ 
+     /* Total logical sectors of ATAPI_SECTOR_SIZE(=2048) bytes */
+-    uint64_t total_sectors = s->nb_sectors >> 2;
++    uint64_t total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+ 
+     if (buf[0] == GPCMD_READ_10) {
+         nb_sectors = lduw_be_p(buf + 7);
+@@ -995,11 +998,15 @@
+     }
+ 
+     lba = ldl_be_p(buf + 2);
+-    if (lba >= total_sectors || lba + nb_sectors - 1 >= total_sectors) {
++    if (lba >= total_sectors || (uint64_t)lba + nb_sectors - 1 >= total_sectors) {
+         ide_atapi_cmd_error(s, ILLEGAL_REQUEST, ASC_LOGICAL_BLOCK_OOR);
+         return;
+     }
+ 
++    if (lba > INT32_MAX || nb_sectors > INT32_MAX / 2048) {
++        ide_atapi_cmd_error(s, ILLEGAL_REQUEST, ASC_INV_FIELD_IN_CMD_PACKET);
++        return;
++    }
+     ide_atapi_cmd_read(s, lba, nb_sectors, 2048);
+ }
+ 
+@@ -1008,7 +1015,7 @@
+     unsigned int nb_sectors, lba, transfer_request;
+ 
+     /* Total logical sectors of ATAPI_SECTOR_SIZE(=2048) bytes */
+-    uint64_t total_sectors = s->nb_sectors >> 2;
++    uint64_t total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+ 
+     nb_sectors = (buf[6] << 16) | (buf[7] << 8) | buf[8];
+     if (nb_sectors == 0) {
+@@ -1017,8 +1024,13 @@
+     }
+ 
+     lba = ldl_be_p(buf + 2);
+-    if (lba >= total_sectors || lba + nb_sectors - 1 >= total_sectors) {
++    if (lba >= total_sectors || (uint64_t)lba + nb_sectors - 1 >= total_sectors) {
+         ide_atapi_cmd_error(s, ILLEGAL_REQUEST, ASC_LOGICAL_BLOCK_OOR);
++        return;
++    }
++
++    if (lba > INT32_MAX || nb_sectors > INT32_MAX / 2352) {
++        ide_atapi_cmd_error(s, ILLEGAL_REQUEST, ASC_INV_FIELD_IN_CMD_PACKET);
+         return;
+     }
+ 
+@@ -1053,7 +1065,7 @@
+ static void cmd_seek(IDEState *s, uint8_t* buf)
+ {
+     unsigned int lba;
+-    uint64_t total_sectors = s->nb_sectors >> 2;
++    uint64_t total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+ 
+     lba = ldl_be_p(buf + 2);
+     if (lba >= total_sectors) {
+@@ -1112,7 +1124,7 @@
+ {
+     int format, msf, start_track, len;
+     int max_len;
+-    uint64_t total_sectors = s->nb_sectors >> 2;
++    uint64_t total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+ 
+     max_len = lduw_be_p(buf + 7);
+     format = buf[9] >> 6;
+@@ -1149,7 +1161,7 @@
+ 
+ static void cmd_read_cdvd_capacity(IDEState *s, uint8_t* buf)
+ {
+-    uint64_t total_sectors = s->nb_sectors >> 2;
++    uint64_t total_sectors = xemu_file_replace_disc_sectors((uintptr_t)blk_bs(s->blk), s->nb_sectors >> 2);
+ 
+     /* NOTE: it is really the number of sectors minus 1 */
+     stl_be_p(buf, total_sectors - 1);
 diff --git a/hw/usb/hcd-ohci.c b/hw/usb/hcd-ohci.c
-index 7b3f120b9c85e9254cf56c74ca0201c9e5e7b1f0..90a72a69282d4c46474187b57b4f29d0853c0852 100644
+index 7b3f120..90a72a6 100644
 --- a/hw/usb/hcd-ohci.c
 +++ b/hw/usb/hcd-ohci.c
 @@ -36,6 +36,10 @@
@@ -954,21 +1098,25 @@ index 7b3f120b9c85e9254cf56c74ca0201c9e5e7b1f0..90a72a69282d4c46474187b57b4f29d0
  
  static USBPortOps ohci_port_ops = {
 diff --git a/hw/xbox/mcpx/apu/monitor.c b/hw/xbox/mcpx/apu/monitor.c
-index 730fcc9d736d729f4997cb5f64d5ccacc2b062f8..ec2e85b6c5b138cc7f81c65c17a85921417e6455 100644
+index 730fcc9..a00682b 100644
 --- a/hw/xbox/mcpx/apu/monitor.c
 +++ b/hw/xbox/mcpx/apu/monitor.c
-@@ -18,6 +18,7 @@
+@@ -18,6 +18,8 @@
   */
  
  #include "apu_int.h"
++#include "ui/xui/debug-tools/addons/diagnostics/av-sync-trace-hook.h"
 +#include "ui/xui/debug-tools/addons/Video-Recorder/video-recorder-c.h"
  
  void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
  {
-@@ -73,8 +74,12 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+@@ -73,8 +75,15 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
          return;
      }
  
++    xemu_debug_tools_av_sync_trace_note_audio_batch(
++        d, ARRAY_SIZE(d->monitor.frame_buf));
++
 +    float vu = pow(fmax(0.0, fmin(g_config.audio.volume_limit, 1.0)), M_E);
 +    float record_gain = fmax(0.0, fmin(g_config.general.video_recording.audio_gain, 2.0));
 +    xemu_video_recorder_submit_audio(&d->monitor.frame_buf[0][0],
@@ -980,7 +1128,7 @@ index 730fcc9d736d729f4997cb5f64d5ccacc2b062f8..ec2e85b6c5b138cc7f81c65c17a85921
          SDL_PutAudioStreamData(d->monitor.stream, d->monitor.frame_buf,
                              sizeof(d->monitor.frame_buf));
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
-index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf335c5b48 100644
+index 1565c05..3595d8b 100644
 --- a/hw/xbox/nv2a/nv2a.c
 +++ b/hw/xbox/nv2a/nv2a.c
 @@ -20,10 +20,14 @@
@@ -998,7 +1146,7 @@ index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf
      /* PFIFO */
      if (d->pfifo.pending_interrupts & d->pfifo.enabled_interrupts) {
          d->pmc.pending_interrupts |= NV_PMC_INTR_0_PFIFO;
-@@ -45,7 +49,6 @@ void nv2a_update_irq(NV2AState *d)
+@@ -44,7 +48,6 @@ void nv2a_update_irq(NV2AState *d)
      } else {
          d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PGRAPH;
      }
@@ -1006,7 +1154,7 @@ index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf
      /* PTIMER */
      if (d->ptimer.pending_interrupts & d->ptimer.enabled_interrupts) {
          d->pmc.pending_interrupts |= NV_PMC_INTR_0_PTIMER;
-@@ -53,10 +56,32 @@ void nv2a_update_irq(NV2AState *d)
+@@ -52,10 +55,32 @@ void nv2a_update_irq(NV2AState *d)
          d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PTIMER;
      }
  
@@ -1039,7 +1187,7 @@ index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf
          pci_irq_deassert(PCI_DEVICE(d));
      }
  }
-@@ -209,6 +234,12 @@ static void nv2a_vga_gfx_update(void *opaque)
+@@ -208,6 +233,12 @@ static void nv2a_vga_gfx_update(void *opaque)
      NV2AState *d = container_of(vga, NV2AState, vga);
      d->pcrtc.pending_interrupts |= NV_PCRTC_INTR_0_VBLANK;
      d->pcrtc.raster = 0;
@@ -1052,7 +1200,7 @@ index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf
  
      nv2a_update_irq(d);
  }
-@@ -277,13 +308,13 @@ static void nv2a_lock_fifo(NV2AState *d)
+@@ -276,13 +307,13 @@ static void nv2a_lock_fifo(NV2AState *d)
      bql_unlock();
      qemu_cond_wait(&d->pfifo.fifo_idle_cond, &d->pfifo.lock);
      bql_lock();
@@ -1069,18 +1217,20 @@ index 41913d1658c7f9c6f60e8763fd444cc2b8b91084..c1faaa0813ab88953d4bc891af319dcf
  }
  
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index e0cab2d09524f7b3d83fc66c5b4c378ef5150082..00713206fa23356b2af7f99d8bff043f8cad7cc1 100644
+index ff4625c..206cd78 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
-@@ -20,6 +20,7 @@
+@@ -20,6 +20,9 @@
   */
  
  #include "nv2a_int.h"
 +#include "ui/xui/debug-tools/addons/diagnostics/flip-stall-trace-hook.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-flip-delay-trace-hook.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-pusher-progress-trace-hook.h"
  
  typedef struct RAMHTEntry {
      uint32_t handle;
-@@ -127,13 +128,17 @@ static bool pfifo_stall_for_flip(NV2AState *d)
+@@ -127,13 +130,17 @@ static bool pfifo_stall_for_flip(NV2AState *d)
      bool should_stall = false;
  
      if (qatomic_read(&d->pgraph.waiting_for_flip)) {
@@ -1100,16 +1250,21 @@ index e0cab2d09524f7b3d83fc66c5b4c378ef5150082..00713206fa23356b2af7f99d8bff043f
      }
  
      return should_stall;
-@@ -187,7 +192,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -183,10 +190,12 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+         assert(subchannel < 8);
+         SET_MASK(*engine_reg, 3 << (4*subchannel), entry.engine);
+         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, entry.engine);
++        xemu_debug_tools_pgraph_flip_delay_pfifo_gate_begin(
++            &d->pgraph, 0, parameter);
+ 
          // TODO: this is fucked
          qemu_mutex_unlock(&d->pfifo.lock);
-         pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
 -        qemu_mutex_lock(&d->pgraph.lock);
 +        PGRAPH_LOCK(&d->pgraph);
  
          // Switch contexts if necessary
          if (can_fifo_access(d)) {
-@@ -199,7 +204,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -198,7 +207,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
              }
          }
  
@@ -1118,16 +1273,21 @@ index e0cab2d09524f7b3d83fc66c5b4c378ef5150082..00713206fa23356b2af7f99d8bff043f
          qemu_mutex_lock(&d->pfifo.lock);
  
      } else if (method >= 0x100) {
-@@ -223,7 +228,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -218,10 +227,12 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+         enum FIFOEngine engine = GET_MASK(*engine_reg, 3 << (4*subchannel));
+         assert(engine == ENGINE_GRAPHICS);
+         SET_MASK(*pull1, NV_PFIFO_CACHE1_PULL1_ENGINE, engine);
++        xemu_debug_tools_pgraph_flip_delay_pfifo_gate_begin(
++            &d->pgraph, method, parameter);
+ 
          // TODO: this is fucked
          qemu_mutex_unlock(&d->pfifo.lock);
-         pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
 -        qemu_mutex_lock(&d->pgraph.lock);
 +        PGRAPH_LOCK(&d->pgraph);
  
          if (can_fifo_access(d)) {
              num_proc =
-@@ -231,7 +236,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -229,7 +240,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
                                num_words_available, max_lookahead_words, inc);
          }
  
@@ -1136,8 +1296,54 @@ index e0cab2d09524f7b3d83fc66c5b4c378ef5150082..00713206fa23356b2af7f99d8bff043f
          qemu_mutex_lock(&d->pfifo.lock);
      } else {
          assert(!"Unrecognized pfifo puller method");
+@@ -290,6 +301,10 @@ static void pfifo_run_pusher(NV2AState *d)
+ 
+     hwaddr dma_len;
+     uint8_t *dma = nv_dma_map(d, dma_instance, &dma_len);
++    XemuDebugToolsPgraphPusherPfifoScope pusher_progress_scope;
++    uint32_t pusher_progress_method_words = 0;
++    xemu_debug_tools_pgraph_pusher_progress_pfifo_begin(
++        &pusher_progress_scope, channel_id, *dma_get, *dma_put);
+ 
+     while (!pfifo_pusher_should_stall(d)) {
+         uint32_t dma_get_v = *dma_get;
+@@ -335,13 +350,20 @@ static void pfifo_run_pusher(NV2AState *d)
+ 
+             *status &= ~NV_PFIFO_CACHE1_STATUS_LOW_MARK;
+ 
++            XemuDebugToolsPgraphPusherPullerScope method_breakdown_scope;
++            xemu_debug_tools_pgraph_pusher_method_breakdown_puller_begin(
++                &method_breakdown_scope);
+             ssize_t num_words_processed =
+                 pfifo_run_puller(d, method_entry, word, word_ptr,
+                                  MIN(method_count, num_words_available),
+                                  num_words_available);
++            xemu_debug_tools_pgraph_pusher_method_breakdown_puller_end(
++                &method_breakdown_scope,
++                num_words_processed > 0 ? (uint32_t)num_words_processed : 0);
+             if (num_words_processed < 0) {
+                 break;
+             }
++            pusher_progress_method_words += (uint32_t)num_words_processed;
+ 
+             dma_get_v += (num_words_processed-1)*4;
+ 
+@@ -437,6 +459,13 @@ static void pfifo_run_pusher(NV2AState *d)
+     // NV2A_DPRINTF("DMA pusher done: max 0x%" HWADDR_PRIx ", 0x%" HWADDR_PRIx " - 0x%" HWADDR_PRIx "\n",
+     //      dma_len, control->dma_get, control->dma_put);
+ 
++    xemu_debug_tools_pgraph_pusher_progress_pfifo_end(
++        &pusher_progress_scope, *dma_get, *dma_put,
++        pusher_progress_method_words,
++        qatomic_read(&d->pgraph.waiting_for_nop) ? 1 : 0,
++        qatomic_read(&d->pgraph.waiting_for_flip) ? 1 : 0,
++        can_fifo_access(d) ? 1 : 0);
++
+     uint32_t error = GET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR);
+     if (error) {
+         NV2A_DPRINTF("pb error: %d\n", error);
 diff --git a/hw/xbox/nv2a/pgraph/gl/draw.c b/hw/xbox/nv2a/pgraph/gl/draw.c
-index c56934187ee7934d6c4f2f37dccffa97c8523183..bfd133284adc0c78afe9aa8b2f50c5f67f57675a 100644
+index c569341..bfd1332 100644
 --- a/hw/xbox/nv2a/pgraph/gl/draw.c
 +++ b/hw/xbox/nv2a/pgraph/gl/draw.c
 @@ -23,6 +23,7 @@
@@ -1336,19 +1542,36 @@ index c56934187ee7934d6c4f2f37dccffa97c8523183..bfd133284adc0c78afe9aa8b2f50c5f6
          NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
          NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");
 diff --git a/hw/xbox/nv2a/pgraph/gl/renderer.c b/hw/xbox/nv2a/pgraph/gl/renderer.c
-index 9964ce8585761f2d1f9f9fa98908ad91d4a693d6..54da4edb0864b314a847bafbb8d8d194f91d52fd 100644
+index e9e2109..2a954f1 100644
 --- a/hw/xbox/nv2a/pgraph/gl/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/gl/renderer.c
-@@ -128,7 +128,7 @@ static void pgraph_gl_process_pending(NV2AState *d)
+@@ -23,6 +23,7 @@
+ #include "hw/xbox/nv2a/pgraph/pgraph.h"
+ #include "debug.h"
+ #include "renderer.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-flip-delay-trace-hook.h"
+ 
+ GloContext *g_nv2a_context_render;
+ GloContext *g_nv2a_context_display;
+@@ -121,13 +122,16 @@ static void pgraph_gl_process_pending(NV2AState *d)
+     PGRAPHState *pg = &d->pgraph;
+     PGRAPHGLState *r = pg->gl_renderer_state;
+ 
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_begin(
++        &d->pgraph, XEMU_PGRAPH_FLIP_DELAY_RENDERER_GL);
++
+     if (qatomic_read(&r->downloads_pending) ||
+         qatomic_read(&r->download_dirty_surfaces_pending) ||
+         qatomic_read(&d->pgraph.sync_pending) ||
+         qatomic_read(&d->pgraph.flush_pending) ||
          qatomic_read(&r->shader_cache_writeback_pending)) {
          qemu_mutex_unlock(&d->pfifo.lock);
-         pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
 -        qemu_mutex_lock(&d->pgraph.lock);
 +        PGRAPH_LOCK(&d->pgraph);
          if (qatomic_read(&r->downloads_pending)) {
              pgraph_gl_process_pending_downloads(d);
          }
-@@ -144,7 +144,7 @@ static void pgraph_gl_process_pending(NV2AState *d)
+@@ -143,9 +147,10 @@ static void pgraph_gl_process_pending(NV2AState *d)
          if (qatomic_read(&r->shader_cache_writeback_pending)) {
              pgraph_gl_shader_write_cache_reload_list(&d->pgraph);
          }
@@ -1356,9 +1579,12 @@ index 9964ce8585761f2d1f9f9fa98908ad91d4a693d6..54da4edb0864b314a847bafbb8d8d194
 +        PGRAPH_UNLOCK(&d->pgraph);
          qemu_mutex_lock(&d->pfifo.lock);
      }
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_cancel();
  }
+ 
+ static void pgraph_gl_pre_savevm_trigger(NV2AState *d)
 diff --git a/hw/xbox/nv2a/pgraph/gl/surface.c b/hw/xbox/nv2a/pgraph/gl/surface.c
-index 714121e6bd2f9dd1f6dfbbf3e613e7f7423a5886..018452e5d364dcba11d6c8593914825e20707cae 100644
+index 714121e..018452e 100644
 --- a/hw/xbox/nv2a/pgraph/gl/surface.c
 +++ b/hw/xbox/nv2a/pgraph/gl/surface.c
 @@ -43,19 +43,19 @@ void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -1404,13 +1630,29 @@ index 714121e6bd2f9dd1f6dfbbf3e613e7f7423a5886..018452e5d364dcba11d6c8593914825e
      if (wait_for_downloads) {
          qemu_mutex_lock(&d->pfifo.lock);
 diff --git a/hw/xbox/nv2a/pgraph/null/renderer.c b/hw/xbox/nv2a/pgraph/null/renderer.c
-index e14fecdfaf869cd0b39cb4dc6a9e02134f583962..feb03247625d99965691e753403f780df7a6bfc8 100644
+index 8b34efc..ee671e2 100644
 --- a/hw/xbox/nv2a/pgraph/null/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/null/renderer.c
-@@ -42,14 +42,14 @@ static void pgraph_null_process_pending(NV2AState *d)
+@@ -21,6 +21,7 @@
+ #include "qemu/thread.h"
+ #include "hw/hw.h"
+ #include "hw/xbox/nv2a/nv2a_int.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-flip-delay-trace-hook.h"
+ 
+ static void pgraph_null_sync(NV2AState *d)
+ {
+@@ -36,21 +37,25 @@ static void pgraph_null_flush(NV2AState *d)
+ 
+ static void pgraph_null_process_pending(NV2AState *d)
+ {
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_begin(
++        &d->pgraph, XEMU_PGRAPH_FLIP_DELAY_RENDERER_NULL);
++
+     if (
+         qatomic_read(&d->pgraph.sync_pending) ||
+         qatomic_read(&d->pgraph.flush_pending)
          ) {
          qemu_mutex_unlock(&d->pfifo.lock);
-         pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
 -        qemu_mutex_lock(&d->pgraph.lock);
 +        PGRAPH_LOCK(&d->pgraph);
          if (qatomic_read(&d->pgraph.sync_pending)) {
@@ -1423,9 +1665,12 @@ index e14fecdfaf869cd0b39cb4dc6a9e02134f583962..feb03247625d99965691e753403f780d
 +        PGRAPH_UNLOCK(&d->pgraph);
          qemu_mutex_lock(&d->pfifo.lock);
      }
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_cancel();
  }
+ 
+ static void pgraph_null_clear_report_value(NV2AState *d)
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84669a5604 100644
+index 9d8118f..34bdbea 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
 @@ -1,3 +1,5 @@
@@ -1442,155 +1687,154 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
  
  #include "hw/xbox/nv2a/nv2a_int.h"
  #include "ui/xemu-notifications.h"
-@@ -27,6 +30,7 @@
+@@ -27,6 +30,9 @@
  #include "util.h"
  #include "swizzle.h"
  #include "nv2a_vsh_emulator.h"
 +#include "ui/xui/debug-tools/addons/diagnostics/pgraph-draw-trace-hook.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-pusher-progress-trace-hook.h"
++#include "ui/xui/debug-tools/addons/diagnostics/av-sync-trace-hook.h"
  
  #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
  #define PG_SET_MASK(reg, mask, value)        \
-@@ -113,7 +117,7 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
-         bql_unlock();
-     }
+@@ -44,7 +50,7 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
+     NV2AState *d = (NV2AState *)opaque;
+     PGRAPHState *pg = &d->pgraph;
  
 -    qemu_mutex_lock(&pg->lock);
 +    PGRAPH_LOCK(pg);
  
      uint64_t r = 0;
      switch (addr) {
-@@ -137,7 +141,7 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
+@@ -74,7 +80,7 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
          break;
      }
  
 -    qemu_mutex_unlock(&pg->lock);
 +    PGRAPH_UNLOCK(pg);
  
-     /* Drop pgraph.lock before reacquiring BQL. */
-     if (had_bql) {
-@@ -219,30 +223,97 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+     nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
+     return r;
+@@ -85,10 +91,36 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+     NV2AState *d = (NV2AState *)opaque;
+     PGRAPHState *pg = &d->pgraph;
  
-     /* Flip-ring consumption must not wait for renderer-owned pgraph.lock. */
-     if (addr == NV_PGRAPH_INCREMENT) {
-+        const uint64_t trace_threshold =
-+            xemu_debug_tools_pgraph_increment_trace_threshold_ns();
-+        XemuDebugToolsPgraphIncrementEvent trace = { 0 };
-+        uint64_t stage_start = 0;
-         bool had_bql = bql_locked();
++    /* Diagnostics fallback for the stock PGRAPH path. Patch 20 replaces this
++     * with its lock-decoupled increment path, but the same trace ABI remains
++     * available when Patch 20 is intentionally omitted for isolation tests. */
++    const uint64_t trace_threshold =
++        (addr == NV_PGRAPH_INCREMENT)
++            ? xemu_debug_tools_pgraph_increment_trace_threshold_ns() : 0;
++    XemuDebugToolsPgraphIncrementEvent trace = { 0 };
++    uint64_t trace_stage_start = 0;
++    if (trace_threshold != 0) {
++        trace.threshold_ns = trace_threshold;
++        trace.host_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++        trace.virtual_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++        trace.value = (uint32_t)val;
++        trace.had_bql = bql_locked() ? 1 : 0;
++    }
 +
-+        if (trace_threshold != 0) {
-+            trace.threshold_ns = trace_threshold;
-+            trace.host_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            trace.virtual_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+            trace.value = (uint32_t)val;
-+            trace.had_bql = had_bql ? 1 : 0;
-+        }
-         if (had_bql) {
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
-             bql_unlock();
-+            if (trace_threshold != 0) {
-+                trace.bql_release_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
-         }
- 
-         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
-             qemu_mutex_lock(&pg->surface_lock);
-+            if (trace_threshold != 0) {
-+                trace.surface_lock_wait_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
- 
-             uint32_t surface = pgraph_surface_read(pg);
-             uint32_t read = GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D);
-             uint32_t modulo = GET_MASK(surface, NV_PGRAPH_SURFACE_MODULO_3D);
-+            if (trace_threshold != 0) {
-+                trace.surface_before = surface;
-+                trace.read_before = read;
-+                trace.modulo = modulo;
-+            }
- 
-             SET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D,
-                      (read + 1) % modulo);
-             pgraph_surface_write_locked(pg, surface);
-+            if (trace_threshold != 0) {
-+                trace.surface_after = surface;
-+                trace.read_after =
-+                    GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D);
-+                trace.surface_update_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
- 
-             qemu_mutex_unlock(&pg->surface_lock);
- 
-+            xemu_debug_tools_flip_stall_trace_record(
-+                XEMU_DEBUG_TOOLS_FLIP_VBLANK_READ_INCREMENT, pg,
-+                NV097_SET_FLIP_READ, (uint32_t)val, read,
-+                GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D), 0);
-+
-             nv2a_profile_increment();
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
-             pgraph_pfifo_kick_nonblocking(d);
-+            if (trace_threshold != 0) {
-+                trace.pfifo_kick_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
-         }
- 
-         if (had_bql) {
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
-             bql_lock();
-+            if (trace_threshold != 0) {
-+                trace.bql_reacquire_wait_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
-+        }
-+        if (trace_threshold != 0) {
-+            trace.host_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            trace.virtual_end_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+            trace.host_duration_ns = trace.host_end_ns - trace.host_start_ns;
-+            trace.virtual_duration_ns =
-+                (int64_t)trace.virtual_end_ns -
-+                (int64_t)trace.virtual_start_ns;
-+            xemu_debug_tools_pgraph_increment_trace_record(&trace);
-         }
-         return;
-     }
-@@ -255,7 +326,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
-     }
+     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
  
      qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
 -    qemu_mutex_lock(&pg->lock);
++    if (trace_threshold != 0) {
++        trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++    }
 +    PGRAPH_LOCK(pg);
++    if (trace_threshold != 0) {
++        /* Stock has one renderer lock rather than Patch 20's surface_lock.
++         * Preserve the stage field by measuring the equivalent serialization
++         * wait here; Patch 20 restores the dedicated surface-lock timing. */
++        trace.surface_lock_wait_ns =
++            qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
++    }
  
      switch (addr) {
-     case NV_PGRAPH_INTR_EN:
-@@ -322,7 +393,7 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+     case NV_PGRAPH_INTR:
+@@ -107,14 +139,46 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+         break;
+     case NV_PGRAPH_INCREMENT:
+         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
++            const uint32_t surface_before = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
++            const uint32_t read_before =
++                GET_MASK(surface_before, NV_PGRAPH_SURFACE_READ_3D);
++            const uint32_t modulo =
++                GET_MASK(surface_before, NV_PGRAPH_SURFACE_MODULO_3D);
++            if (trace_threshold != 0) {
++                trace.surface_before = surface_before;
++                trace.read_before = read_before;
++                trace.modulo = modulo;
++                trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++            }
++
+             PG_SET_MASK(NV_PGRAPH_SURFACE,
+                      NV_PGRAPH_SURFACE_READ_3D,
+-                     (PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                              NV_PGRAPH_SURFACE_READ_3D)+1)
+-                        % PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                                   NV_PGRAPH_SURFACE_MODULO_3D) );
++                     (read_before + 1) % modulo);
++
++            const uint32_t surface_after = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
++            const uint32_t read_after =
++                GET_MASK(surface_after, NV_PGRAPH_SURFACE_READ_3D);
++            if (trace_threshold != 0) {
++                trace.surface_after = surface_after;
++                trace.read_after = read_after;
++                trace.surface_update_ns =
++                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
++            }
++
++            xemu_debug_tools_flip_stall_trace_record(
++                XEMU_DEBUG_TOOLS_FLIP_VBLANK_READ_INCREMENT, pg,
++                NV097_SET_FLIP_READ, (uint32_t)val, read_before,
++                read_after, 0);
++
+             nv2a_profile_increment();
++            if (trace_threshold != 0) {
++                trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++            }
+             pfifo_kick(d);
++            if (trace_threshold != 0) {
++                trace.pfifo_kick_ns =
++                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
++            }
+         }
+         break;
+     case NV_PGRAPH_RDI_DATA: {
+@@ -173,8 +237,21 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
          break;
      }
  
 -    qemu_mutex_unlock(&pg->lock);
 +    PGRAPH_UNLOCK(pg);
      qemu_mutex_unlock(&d->pfifo.lock);
++
++    if (trace_threshold != 0) {
++        /* Stock never drops BQL in this path, so there is no reacquire wait.
++         * Keep the field explicit so the profiler output remains comparable. */
++        trace.bql_reacquire_wait_ns = 0;
++        trace.bql_held_after = bql_locked() ? 1 : 0;
++        trace.host_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
++        trace.virtual_end_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++        trace.host_duration_ns = trace.host_end_ns - trace.host_start_ns;
++        trace.virtual_duration_ns =
++            (int64_t)trace.virtual_end_ns - (int64_t)trace.virtual_start_ns;
++        xemu_debug_tools_pgraph_increment_trace_record(&trace);
++    }
+ }
  
-     if (had_bql) {
-@@ -356,11 +427,11 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
-         qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_CONTEXT_SWITCH);
-         qemu_mutex_unlock(&pg->interrupt_lock);
+ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
+@@ -198,12 +275,12 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
+                             NV_PGRAPH_DEBUG_3_HW_CONTEXT_SWITCH));
  
+         pg->waiting_for_context_switch = true;
 -        qemu_mutex_unlock(&pg->lock);
 +        PGRAPH_UNLOCK(pg);
          bql_lock();
+         pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
          nv2a_update_irq(d);
          bql_unlock();
 -        qemu_mutex_lock(&pg->lock);
@@ -1598,7 +1842,7 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
      }
  }
  
-@@ -835,6 +906,8 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
+@@ -669,8 +746,27 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
      uint32_t graphics_class = PG_GET_MASK(NV_PGRAPH_CTX_SWITCH1,
                                         NV_PGRAPH_CTX_SWITCH1_GRCLASS);
  
@@ -1606,8 +1850,27 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
 +        subchannel, graphics_class, method, parameter);
      pgraph_method_log(subchannel, graphics_class, method, parameter);
  
++    /* Diagnostics-only identity handoff for the PFIFO puller timer. The timer
++     * itself lives at the existing pfifo_run_puller() call boundary so this
++     * path adds no clock read inside PGRAPH. */
++    uint32_t pusher_method_base = method;
++    const char *pusher_method_name = NULL;
++    if (graphics_class == NV_KELVIN_PRIMITIVE) {
++        size_t pusher_method_index = METHOD_ADDR_TO_INDEX(method);
++        if (pusher_method_index < ARRAY_SIZE(pgraph_kelvin_methods) &&
++            pgraph_kelvin_methods[pusher_method_index].handler != NULL) {
++            pusher_method_base = pgraph_kelvin_methods[pusher_method_index].base;
++            pusher_method_name = pgraph_kelvin_methods[pusher_method_index].name;
++        }
++    }
++    xemu_debug_tools_pgraph_pusher_method_breakdown_note_method(
++        subchannel, graphics_class, method, pusher_method_base, parameter,
++        pusher_method_name);
++
      if (subchannel != 0) {
-@@ -973,11 +1046,13 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
+         // catches context switching issues on xbox d3d
+         assert(graphics_class != 0x97);
+@@ -807,11 +903,13 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
          goto unhandled;
      }
  
@@ -1621,9 +1884,9 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
      return num_processed;
  }
  
-@@ -1017,11 +1092,11 @@ DEF_METHOD(NV097, NO_OPERATION)
-     qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_ERROR);
-     qemu_mutex_unlock(&pg->interrupt_lock);
+@@ -849,11 +947,11 @@ DEF_METHOD(NV097, NO_OPERATION)
+     pg->pending_interrupts |= NV_PGRAPH_INTR_ERROR;
+     pg->waiting_for_nop = true;
  
 -    qemu_mutex_unlock(&pg->lock);
 +    PGRAPH_UNLOCK(pg);
@@ -1635,39 +1898,34 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
  }
  
  DEF_METHOD(NV097, WAIT_FOR_IDLE)
-@@ -1034,6 +1109,9 @@ DEF_METHOD(NV097, SET_FLIP_READ)
-     qemu_mutex_lock(&pg->surface_lock);
-     pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_READ_3D, parameter);
-     qemu_mutex_unlock(&pg->surface_lock);
+@@ -863,18 +961,24 @@ DEF_METHOD(NV097, WAIT_FOR_IDLE)
+ 
+ DEF_METHOD(NV097, SET_FLIP_READ)
+ {
 +    xemu_debug_tools_flip_stall_trace_record(
-+        XEMU_DEBUG_TOOLS_FLIP_SET_READ, pg, NV097_SET_FLIP_READ,
-+        parameter, 0, 0, 0);
++        XEMU_DEBUG_TOOLS_FLIP_SET_READ, pg, NV097_SET_FLIP_READ, parameter, 0, 0, 0);
+     PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D,
+              parameter);
  }
  
  DEF_METHOD(NV097, SET_FLIP_WRITE)
-@@ -1041,6 +1119,9 @@ DEF_METHOD(NV097, SET_FLIP_WRITE)
-     qemu_mutex_lock(&pg->surface_lock);
-     pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_WRITE_3D, parameter);
-     qemu_mutex_unlock(&pg->surface_lock);
+ {
 +    xemu_debug_tools_flip_stall_trace_record(
-+        XEMU_DEBUG_TOOLS_FLIP_SET_WRITE, pg, NV097_SET_FLIP_WRITE,
-+        parameter, 0, 0, 0);
++        XEMU_DEBUG_TOOLS_FLIP_SET_WRITE, pg, NV097_SET_FLIP_WRITE, parameter, 0, 0, 0);
+     PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D,
+              parameter);
  }
  
  DEF_METHOD(NV097, SET_FLIP_MODULO)
-@@ -1048,6 +1129,9 @@ DEF_METHOD(NV097, SET_FLIP_MODULO)
-     qemu_mutex_lock(&pg->surface_lock);
-     pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_MODULO_3D, parameter);
-     qemu_mutex_unlock(&pg->surface_lock);
+ {
 +    xemu_debug_tools_flip_stall_trace_record(
-+        XEMU_DEBUG_TOOLS_FLIP_SET_MODULO, pg, NV097_SET_FLIP_MODULO,
-+        parameter, 0, 0, 0);
++        XEMU_DEBUG_TOOLS_FLIP_SET_MODULO, pg, NV097_SET_FLIP_MODULO, parameter, 0, 0, 0);
+     PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_MODULO_3D,
+              parameter);
  }
- 
- DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
-@@ -1065,17 +1149,24 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
- 
-     qemu_mutex_unlock(&pg->surface_lock);
+@@ -894,17 +998,25 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
+     uint32_t new =
+         PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
  
 +    xemu_debug_tools_flip_stall_trace_record(
 +        XEMU_DEBUG_TOOLS_FLIP_INCREMENT_WRITE, pg,
@@ -1683,6 +1941,7 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
      d->pgraph.renderer->ops.surface_update(d, false, true, true);
      d->pgraph.renderer->ops.flip_stall(d);
      nv2a_profile_flip_stall();
++    xemu_debug_tools_av_sync_trace_note_pgraph_flip(pg->frame_time);
      pg->waiting_for_flip = true;
 +    xemu_debug_tools_flip_stall_trace_record(
 +        XEMU_DEBUG_TOOLS_FLIP_WAITING_SET, pg, NV097_FLIP_STALL,
@@ -1690,7 +1949,7 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
  }
  
  // TODO: these should be loading the dma objects from ramin here?
-@@ -2676,9 +2767,21 @@ DEF_METHOD(NV097, SET_BEGIN_END)
+@@ -2505,9 +2617,21 @@ DEF_METHOD(NV097, SET_BEGIN_END)
              return;
          }
          nv2a_profile_inc_counter(NV2A_PROF_BEGIN_ENDS);
@@ -1712,7 +1971,49 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
      } else {
          if (pg->primitive_mode != PRIM_TYPE_INVALID) {
              NV2A_DPRINTF("Begin without End!\n");
-@@ -3359,19 +3462,19 @@ void pgraph_process_pending(NV2AState *d)
+@@ -2847,10 +2971,13 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
+ {
+     d->pgraph.renderer->ops.surface_update(d, false, true, true);
+ 
+-    //qemu_mutex_unlock(&d->pgraph.lock);
++    //PGRAPH_UNLOCK(&d->pgraph);
+     //bql_lock();
+ 
+     uint32_t semaphore_offset = pgraph_reg_r(pg, NV_PGRAPH_SEMAPHOREOFFSET);
++    XemuDebugToolsPgraphPusherSemaphoreScope pusher_progress_scope;
++    xemu_debug_tools_pgraph_pusher_progress_semaphore_begin(
++        &pusher_progress_scope, pg->dma_semaphore, semaphore_offset, parameter);
+ 
+     hwaddr semaphore_dma_len;
+     uint8_t *semaphore_data = (uint8_t*)nv_dma_map(d, pg->dma_semaphore,
+@@ -2858,9 +2985,25 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
+     assert(semaphore_offset < semaphore_dma_len);
+     semaphore_data += semaphore_offset;
+ 
++    if (pusher_progress_scope.active) {
++        const hwaddr semaphore_phys = semaphore_data - d->vram_ptr;
++        const uint32_t semaphore_guest_va =
++            semaphore_phys < memory_region_size(d->vram) &&
++                    semaphore_phys <= 0x7FFFFFFFu
++                ? 0x80000000u + (uint32_t)semaphore_phys
++                : 0;
++        xemu_debug_tools_pgraph_pusher_progress_semaphore_target(
++            &pusher_progress_scope, (uint32_t)semaphore_phys,
++            semaphore_guest_va, ldl_le_p((uint32_t*)semaphore_data));
++    }
++    xemu_debug_tools_pgraph_pusher_progress_semaphore_prewrite(
++        &pusher_progress_scope,
++        qatomic_read(&d->pgraph.waiting_for_nop) ? 1 : 0,
++        qatomic_read(&d->pgraph.waiting_for_flip) ? 1 : 0);
++
+     stl_le_p((uint32_t*)semaphore_data, parameter);
+ 
+-    //qemu_mutex_lock(&d->pgraph.lock);
++    //PGRAPH_LOCK(&d->pgraph);
+     //bql_unlock();
+ }
+ 
+@@ -3188,19 +3331,19 @@ void pgraph_process_pending(NV2AState *d)
      if (pg->renderer_switch_phase == PGRAPH_RENDERER_SWITCH_PHASE_CPU_WAITING) {
          qemu_mutex_lock(&d->pgraph.renderer_lock);
          qemu_mutex_unlock(&d->pfifo.lock);
@@ -1735,7 +2036,7 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
              while (pg->framebuffer_in_use) {
                  qemu_cond_wait(&d->pgraph.framebuffer_released,
                                 &d->pgraph.renderer_lock);
-@@ -3385,7 +3488,7 @@ void pgraph_process_pending(NV2AState *d)
+@@ -3214,7 +3357,7 @@ void pgraph_process_pending(NV2AState *d)
          init_renderer(pg);
  
          qemu_mutex_unlock(&d->pgraph.renderer_lock);
@@ -1745,7 +2046,7 @@ index 348ce3eecdb9b08b37cc861d3297411b17612364..8314b8a4db2fc0d46bdd232712ce2d84
  
          pg->renderer_switch_phase = PGRAPH_RENDERER_SWITCH_PHASE_IDLE;
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.h b/hw/xbox/nv2a/pgraph/pgraph.h
-index 6a1fcf09ed60c6054fcd14340159c07f720efd08..025684c0a6a3fbef8408ca0b47bc729bb3afe308 100644
+index b4db914..0660a3d 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.h
 +++ b/hw/xbox/nv2a/pgraph/pgraph.h
 @@ -28,6 +28,7 @@
@@ -1756,7 +2057,7 @@ index 6a1fcf09ed60c6054fcd14340159c07f720efd08..025684c0a6a3fbef8408ca0b47bc729b
  
  #include "surface.h"
  #include "texture.h"
-@@ -280,6 +281,25 @@ typedef struct PGRAPHState {
+@@ -272,6 +273,25 @@ typedef struct PGRAPHState {
      };
  } PGRAPHState;
  
@@ -1779,27 +2080,183 @@ index 6a1fcf09ed60c6054fcd14340159c07f720efd08..025684c0a6a3fbef8408ca0b47bc729b
 +#define PGRAPH_LOCK(pg) pgraph_lock_observed((pg), __FILE__, __LINE__)
 +#define PGRAPH_UNLOCK(pg) pgraph_unlock_observed((pg), __FILE__, __LINE__)
 +
- static inline void pgraph_cpu_mmio_access_begin(PGRAPHState *pg)
- {
-     qemu_mutex_lock(&pg->cpu_mmio_access_lock);
+ void pgraph_init(NV2AState *d);
+ void pgraph_init_thread(NV2AState *d);
+ void pgraph_destroy(PGRAPHState *pg);
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
-index d78087e56bfb2c8e8c62dfc36389fb7de4741a5b..a327bab4079b09152d6467c5d0b7bd1fb328b437 100644
+index d78087e..fbcfd2f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
-@@ -19,6 +19,8 @@
+@@ -19,6 +19,9 @@
  
  #include "qemu/osdep.h"
  #include "qemu/fast-hash.h"
 +#include "qemu/timer.h"
 +#include "ui/xui/debug-tools/addons/diagnostics/flip-stall-trace-hook.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-draw-trace-hook.h"
  #include "renderer.h"
  #include <math.h>
  
-@@ -1213,6 +1215,14 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
+@@ -427,6 +430,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
+ 
+     NV2A_VK_DGROUP_BEGIN("Creating clear pipeline");
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_STATE_KEY, pg, 0, 0);
+     PipelineKey key;
+     memset(&key, 0, sizeof(key));
+     key.clear = true;
+@@ -435,10 +440,18 @@ static void create_clear_pipeline(PGRAPHState *pg)
+     key.regs[0] = r->clear_parameter;
+ 
+     uint64_t hash = fast_hash((void *)&key, sizeof(key));
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_STATE_KEY);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CACHE_LOOKUP, pg, 0, 0);
+     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
+     PipelineBinding *snode = container_of(node, PipelineBinding, node);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CACHE_LOOKUP);
+ 
+     if (snode->pipeline != VK_NULL_HANDLE) {
++        xemu_debug_tools_pgraph_draw_trace_pipeline_cache(
++            XEMU_DEBUG_TOOLS_PGRAPH_PIPELINE_CACHE_HIT);
+         NV2A_VK_DPRINTF("Cache hit");
+         r->pipeline_binding_changed = r->pipeline_binding != snode;
+         r->pipeline_binding = snode;
+@@ -446,6 +459,10 @@ static void create_clear_pipeline(PGRAPHState *pg)
+         return;
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_pipeline_cache(
++        XEMU_DEBUG_TOOLS_PGRAPH_PIPELINE_CACHE_MISS);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BUILD_STATE, pg, 0, 0);
+     NV2A_VK_DPRINTF("Cache miss");
+     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
+     memcpy(&snode->key, &key, sizeof(key));
+@@ -597,9 +614,17 @@ static void create_clear_pipeline(PGRAPHState *pg)
+     };
+ 
+     VkPipeline pipeline;
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BUILD_STATE);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CREATE, pg, 0, 0);
+     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                        &pipeline_info, NULL, &pipeline));
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CREATE);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_INSTALL, pg, 0, 0);
+     snode->pipeline = pipeline;
+     snode->layout = layout;
+     snode->render_pass = pipeline_info.renderPass;
+@@ -608,6 +633,8 @@ static void create_clear_pipeline(PGRAPHState *pg)
+     r->pipeline_binding = snode;
+     r->pipeline_binding_changed = true;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_INSTALL);
+     NV2A_VK_DGROUP_END();
+ }
+ 
+@@ -696,8 +723,18 @@ static void create_pipeline(PGRAPHState *pg)
+     NV2AState *d = container_of(pg, NV2AState, pgraph);
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_TEXTURE_BIND, pg, 0, 0);
+     pgraph_vk_bind_textures(d);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_TEXTURE_BIND);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SHADER_BIND, pg, 0, 0);
+     pgraph_vk_bind_shaders(pg);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SHADER_BIND);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_STATE_KEY, pg, 0, 0);
+ 
+     // FIXME: If nothing was dirty, don't even try creating the key or hashing.
+     //        Just use the same pipeline.
+@@ -707,6 +744,10 @@ static void create_pipeline(PGRAPHState *pg)
+     // FIXME: We could clear less
+ 
+     if (r->pipeline_binding && !pipeline_dirty) {
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_STATE_KEY);
++        xemu_debug_tools_pgraph_draw_trace_pipeline_cache(
++            XEMU_DEBUG_TOOLS_PGRAPH_PIPELINE_FAST_REUSE);
+         NV2A_VK_DPRINTF("Cache hit");
+         NV2A_VK_DGROUP_END();
+         return;
+@@ -716,9 +757,17 @@ static void create_pipeline(PGRAPHState *pg)
+     init_pipeline_key(pg, &key);
+     uint64_t hash = fast_hash((void *)&key, sizeof(key));
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_STATE_KEY);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CACHE_LOOKUP, pg, 0, 0);
+     LruNode *node = lru_lookup(&r->pipeline_cache, hash, &key);
+     PipelineBinding *snode = container_of(node, PipelineBinding, node);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CACHE_LOOKUP);
+     if (snode->pipeline != VK_NULL_HANDLE) {
++        xemu_debug_tools_pgraph_draw_trace_pipeline_cache(
++            XEMU_DEBUG_TOOLS_PGRAPH_PIPELINE_CACHE_HIT);
+         NV2A_VK_DPRINTF("Cache hit");
+         r->pipeline_binding_changed = r->pipeline_binding != snode;
+         r->pipeline_binding = snode;
+@@ -726,6 +775,10 @@ static void create_pipeline(PGRAPHState *pg)
+         return;
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_pipeline_cache(
++        XEMU_DEBUG_TOOLS_PGRAPH_PIPELINE_CACHE_MISS);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BUILD_STATE, pg, 0, 0);
+     NV2A_VK_DPRINTF("Cache miss");
+     nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_GEN);
+ 
+@@ -1005,9 +1058,17 @@ static void create_pipeline(PGRAPHState *pg)
+         .basePipelineHandle = VK_NULL_HANDLE,
+     };
+     VkPipeline pipeline;
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BUILD_STATE);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CREATE, pg, 0, 0);
+     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
+                                        &pipeline_create_info, NULL, &pipeline));
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_CREATE);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_INSTALL, pg, 0, 0);
+     snode->pipeline = pipeline;
+     snode->layout = layout;
+     snode->render_pass = pipeline_create_info.renderPass;
+@@ -1016,6 +1077,8 @@ static void create_pipeline(PGRAPHState *pg)
+     r->pipeline_binding = snode;
+     r->pipeline_binding_changed = true;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_INSTALL);
+     NV2A_VK_DGROUP_END();
+ }
+ 
+@@ -1213,6 +1276,17 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
  void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
  {
      PGRAPHVkState *r = pg->vk_renderer_state;
 +    uint64_t flip_trace_start_ns = 0;
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_TOTAL, pg, finish_reason, r->in_command_buffer ? 1 : 0);
++
 +
 +    if (finish_reason == VK_FINISH_REASON_FLIP_STALL) {
 +        flip_trace_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
@@ -1810,7 +2267,35 @@ index d78087e56bfb2c8e8c62dfc36389fb7de4741a5b..a327bab4079b09152d6467c5d0b7bd1f
  
      assert(!r->in_draw);
      assert(r->debug_depth == 0);
-@@ -1293,6 +1303,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+@@ -1259,8 +1333,13 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+         };
+         nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT);
+         vkResetFences(r->device, 1, &r->command_buffer_fence);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_QUEUE_SUBMIT, pg, finish_reason, 0);
+         VK_CHECK(vkQueueSubmit(r->queue, ARRAY_SIZE(submit_infos), submit_infos,
+                                r->command_buffer_fence));
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_QUEUE_SUBMIT);
++
+         r->submit_count += 1;
+ 
+         bool check_budget = false;
+@@ -1277,8 +1356,13 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
+             check_budget = true;
+         }
+ 
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_FENCE_WAIT, pg, finish_reason, 0);
+         VK_CHECK(vkWaitForFences(r->device, 1, &r->command_buffer_fence,
+                                  VK_TRUE, UINT64_MAX));
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_FENCE_WAIT);
++
+ 
+         r->descriptor_set_index = 0;
+         r->in_command_buffer = false;
+@@ -1293,6 +1377,16 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
      pgraph_vk_process_pending_reports_internal(d);
  
      pgraph_vk_compute_finish_complete(r);
@@ -1822,23 +2307,483 @@ index d78087e56bfb2c8e8c62dfc36389fb7de4741a5b..a327bab4079b09152d6467c5d0b7bd1f
 +            NV097_FLIP_STALL, (uint32_t)finish_reason, 0, 0,
 +            end_ns >= flip_trace_start_ns ? end_ns - flip_trace_start_ns : 0);
 +    }
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FINISH_TOTAL);
  }
  
  void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
+@@ -1356,18 +1450,29 @@ static void begin_pre_draw(PGRAPHState *pg)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PRE_DRAW, pg, 0, 0);
++
+     assert(r->color_binding || r->zeta_binding);
+     assert(!r->color_binding || r->color_binding->initialized);
+     assert(!r->zeta_binding || r->zeta_binding->initialized);
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_PREP, pg,
++        pg->clearing ? 1 : 0, 0);
+     if (pg->clearing) {
+         create_clear_pipeline(pg);
+     } else {
+         create_pipeline(pg);
+     }
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_PREP);
+ 
+     bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FRAMEBUFFER_PREP, pg,
++        r->framebuffer_dirty ? 1 : 0, render_pass_dirty ? 1 : 0);
+     if (r->framebuffer_dirty || render_pass_dirty) {
+         pgraph_vk_ensure_not_in_render_pass(pg);
+     }
+@@ -1378,14 +1483,35 @@ static void begin_pre_draw(PGRAPHState *pg)
+         create_frame_buffer(pg);
+         r->framebuffer_dirty = false;
+     }
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FRAMEBUFFER_PREP);
+     if (!pg->clearing) {
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DESCRIPTOR_UPDATE, pg, 0, 0);
+         pgraph_vk_update_descriptor_sets(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DESCRIPTOR_UPDATE);
+     }
++    /* Descriptor updates may finish the command buffer and destroy framebuffers.
++     * Keep this recovery after them; timing hooks must not reorder renderer work.
++     */
+     if (r->framebuffer_index == 0) {
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FRAMEBUFFER_PREP, pg, 0, 0);
+         create_frame_buffer(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FRAMEBUFFER_PREP);
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_COMMAND_BUFFER, pg,
++        r->in_command_buffer ? 1 : 0, 0);
+     pgraph_vk_ensure_command_buffer(pg);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_COMMAND_BUFFER);
++
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PRE_DRAW);
+ }
+ 
+ static float clamp_line_width_to_device_limits(PGRAPHState *pg, float width)
+@@ -1407,8 +1533,14 @@ static void begin_draw(PGRAPHState *pg)
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_BEGIN_DRAW, pg, 0, 0);
++
+     assert(r->in_command_buffer);
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_RENDER_PASS, pg,
++        r->in_render_pass ? 1 : 0, r->query_in_flight ? 1 : 0);
+     // Visibility testing
+     if (!pg->clearing && pg->zpass_pixel_count_enable) {
+         if (r->new_query_needed && r->query_in_flight) {
+@@ -1434,8 +1566,12 @@ static void begin_draw(PGRAPHState *pg)
+         begin_render_pass(pg);
+         must_bind_pipeline = true;
+     }
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_RENDER_PASS);
+ 
+     if (must_bind_pipeline) {
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BIND, pg, 0, 0);
+         nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_BIND);
+         vkCmdBindPipeline(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           r->pipeline_binding->pipeline);
+@@ -1480,14 +1616,22 @@ static void begin_draw(PGRAPHState *pg)
+                 clamp_line_width_to_device_limits(pg, pg->surface_scale_factor);
+             vkCmdSetLineWidth(r->command_buffer, line_width);
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_PIPELINE_BIND);
+     }
+ 
+     if (!pg->clearing) {
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DESCRIPTOR_BIND, pg, 0, 0);
+         bind_descriptor_sets(pg);
+         push_vertex_attr_values(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DESCRIPTOR_BIND);
+     }
+ 
+     r->in_draw = true;
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_BEGIN_DRAW);
+ }
+ 
+ static void end_draw(PGRAPHState *pg)
+@@ -1509,6 +1653,9 @@ void pgraph_vk_draw_end(NV2AState *d)
+     PGRAPHState *pg = &d->pgraph;
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DRAW_END_TOTAL, pg, 0, 0);
++
+     uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+     bool mask_alpha = control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE;
+     bool mask_red = control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE;
+@@ -1529,10 +1676,16 @@ void pgraph_vk_draw_end(NV2AState *d)
+         // processing, it is legal to attempt a draw that is entirely
+         // clipped regardless of 0x880. See xemu#635 for context.
+         NV2A_VK_DPRINTF("nop draw!\n");
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DRAW_END_TOTAL);
+         return;
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FLUSH_DRAW, pg, 0, 0);
+     pgraph_vk_flush_draw(d);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_FLUSH_DRAW);
+ 
+     pg->draw_time++;
+     if (r->color_binding && pgraph_color_write_enabled(pg)) {
+@@ -1542,7 +1695,14 @@ void pgraph_vk_draw_end(NV2AState *d)
+         r->zeta_binding->draw_time = pg->draw_time;
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SURFACE_DIRTY, pg,
++        color_write ? 1 : 0, (depth_test || stencil_test) ? 1 : 0);
+     pgraph_vk_set_surface_dirty(pg, color_write, depth_test || stencil_test);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SURFACE_DIRTY);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_DRAW_END_TOTAL);
+ }
+ 
+ static int compare_memory_sync_requirement_by_addr(const void *p1,
+@@ -1565,6 +1725,10 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+         return;
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_metric(
++        XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_REQUESTED_RANGES, r->num_vertex_ram_buffer_syncs);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_RANGE_PREP, pg, 0, 0);
+     // Align sync requirements to page boundaries
+     NV2A_VK_DGROUP_BEGIN("Sync vertex RAM buffer");
+ 
+@@ -1620,17 +1784,39 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
+         NV2A_VK_DPRINTF("Reduced to %d sync checks", num_syncs);
+     }
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_RANGE_PREP);
++    xemu_debug_tools_pgraph_draw_trace_metric(
++        XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_MERGED_RANGES, num_syncs);
+     for (int i = 0; i < num_syncs; i++) {
+         hwaddr addr = merged[i].addr;
+         VkDeviceSize size = merged[i].size;
+ 
+         NV2A_VK_DPRINTF("- %d: %08"HWADDR_PRIx" %zd bytes", i, addr, size);
+ 
++        xemu_debug_tools_pgraph_draw_trace_metric(
++            XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_TESTED_BYTES, size);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_DIRTY_CHECK, pg, 0, 0);
+         if (memory_region_test_and_clear_dirty(d->vram, addr, size,
+                                                DIRTY_MEMORY_NV2A)) {
++            xemu_debug_tools_pgraph_draw_trace_stage_end(
++                XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_DIRTY_CHECK);
++            xemu_debug_tools_pgraph_draw_trace_metric(
++                XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_DIRTY_RANGES, 1);
++            xemu_debug_tools_pgraph_draw_trace_metric(
++                XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_DIRTY_BYTES, size);
+             NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
++            xemu_debug_tools_pgraph_draw_trace_stage_begin(
++                XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_RANGE_UPDATE, pg, 0, 0);
++
+             pgraph_vk_update_vertex_ram_buffer(pg, addr, d->vram_ptr + addr,
+                                                size);
++            xemu_debug_tools_pgraph_draw_trace_stage_end(
++                XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_RANGE_UPDATE);
++        } else {
++            xemu_debug_tools_pgraph_draw_trace_stage_end(
++                XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_DIRTY_CHECK);
+         }
+     }
+ 
+@@ -2038,31 +2224,62 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         assert(pg->inline_buffer_length == 0);
+         assert(pg->inline_array_length == 0);
+ 
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND, pg,
++            pg->draw_arrays_min_start, pg->draw_arrays_max_count);
+         pgraph_vk_bind_vertex_attributes(d, pg->draw_arrays_min_start,
+                                          pg->draw_arrays_max_count - 1, false,
+                                          0, pg->draw_arrays_max_count - 1);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN, pg,
++            pg->draw_arrays_length, 0);
+         uint32_t min_element = INT_MAX;
+         uint32_t max_element = 0;
+         for (int i = 0; i < pg->draw_arrays_length; i++) {
+             min_element = MIN(pg->draw_arrays_start[i], min_element);
+             max_element = MAX(max_element, pg->draw_arrays_start[i] + pg->draw_arrays_count[i]);
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SYNC_VERTEX_RAM, pg, 0, 0);
+         sync_vertex_ram_buffer(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SYNC_VERTEX_RAM);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_REMAP_ATTRIBUTES, pg, max_element, 0);
+         VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_REMAP_ATTRIBUTES);
+ 
+         begin_pre_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD, pg, max_element, 0);
+         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD);
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Draw Arrays");
+         begin_draw(pg);
+         bind_vertex_buffer(pg, remap.attributes, 0);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW, pg,
++            pg->draw_arrays_length, pg->draw_arrays_max_count);
+         for (int i = 0; i < pg->draw_arrays_length; i++) {
+             uint32_t start = pg->draw_arrays_start[i],
+                      count = pg->draw_arrays_count[i];
+             NV2A_VK_DPRINTF("- [%d] Start:%d Count:%d", i, start, count);
+             vkCmdDraw(r->command_buffer, count, 1, start, 0);
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW, pg, 0, 0);
+         end_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+ 
+         NV2A_VK_DGROUP_END();
+@@ -2078,22 +2295,44 @@ void pgraph_vk_flush_draw(NV2AState *d)
+ 
+         ensure_buffer_space(pg, BUFFER_INDEX_STAGING, index_data_size);
+ 
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN, pg,
++            pg->inline_elements_length, 0);
+         uint32_t min_element = (uint32_t)-1;
+         uint32_t max_element = 0;
+         for (int i = 0; i < pg->inline_elements_length; i++) {
+             max_element = MAX(pg->inline_elements[i], max_element);
+             min_element = MIN(pg->inline_elements[i], min_element);
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND, pg, min_element, max_element);
+         pgraph_vk_bind_vertex_attributes(
+             d, min_element, max_element, false, 0,
+             pg->inline_elements[pg->inline_elements_length - 1]);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SYNC_VERTEX_RAM, pg, 0, 0);
+         sync_vertex_ram_buffer(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_SYNC_VERTEX_RAM);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_REMAP_ATTRIBUTES, pg, max_element + 1, 0);
+         VertexBufferRemap remap = remap_unaligned_attributes(pg, max_element + 1);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_REMAP_ATTRIBUTES);
+ 
+         begin_pre_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD, pg,
++            pg->inline_elements_length, index_data_size);
+         copy_remapped_attributes_to_inline_buffer(pg, remap, 0, max_element + 1);
+         VkDeviceSize buffer_offset = pgraph_vk_update_index_buffer(
+             pg, pg->inline_elements, index_data_size);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD);
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Elements");
+         begin_draw(pg);
+@@ -2101,9 +2340,18 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         vkCmdBindIndexBuffer(r->command_buffer,
+                              r->storage_buffers[BUFFER_INDEX].buffer,
+                              buffer_offset, VK_INDEX_TYPE_UINT32);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW, pg,
++            pg->inline_elements_length, 0);
+         vkCmdDrawIndexed(r->command_buffer, pg->inline_elements_length, 1, 0, 0,
+                          0);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW, pg, 0, 0);
+         end_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+ 
+         NV2A_VK_DGROUP_END();
+@@ -2117,7 +2365,15 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         size_t sizes[NV2A_VERTEXSHADER_ATTRIBUTES];
+         size_t offset = 0;
+ 
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND, pg,
++            pg->inline_buffer_length, 0);
+         pgraph_vk_bind_vertex_attributes_inline(d);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN, pg,
++            r->num_active_vertex_attribute_descriptions, 0);
+         for (int i = 0; i < r->num_active_vertex_attribute_descriptions; i++) {
+             int attr_index = r->vertex_attribute_descriptions[i].location;
+ 
+@@ -2130,17 +2386,32 @@ void pgraph_vk_flush_draw(NV2AState *d)
+             attr->inline_buffer_populated = false;
+             offset += vertex_data_size;
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN);
+         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING, offset);
+ 
+         begin_pre_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD, pg, offset, 0);
+         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
+             pg, data, sizes, r->num_active_vertex_attribute_descriptions);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD);
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Buffer");
+         begin_draw(pg);
+         bind_inline_vertex_buffer(pg, buffer_offset);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW, pg,
++            pg->inline_buffer_length, 0);
+         vkCmdDraw(r->command_buffer, pg->inline_buffer_length, 1, 0, 0);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW, pg, 0, 0);
+         end_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+ 
+         NV2A_VK_DGROUP_END();
+@@ -2152,6 +2423,9 @@ void pgraph_vk_flush_draw(NV2AState *d)
+         ensure_buffer_space(pg, BUFFER_VERTEX_INLINE_STAGING,
+                                inline_array_data_size);
+ 
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN, pg,
++            pg->inline_array_length, 0);
+         unsigned int offset = 0;
+         for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
+             VertexAttribute *attr = &pg->vertex_attributes[i];
+@@ -2167,24 +2441,44 @@ void pgraph_vk_flush_draw(NV2AState *d)
+             offset += attr->size * attr->count;
+             offset = ROUND_UP(offset, attr->size);
+         }
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ELEMENT_SCAN);
+ 
+         unsigned int vertex_size = offset;
+         unsigned int index_count = pg->inline_array_length * 4 / vertex_size;
+ 
+         NV2A_DPRINTF("draw inline array %d, %d\n", vertex_size, index_count);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND, pg,
++            vertex_size, index_count);
+         pgraph_vk_bind_vertex_attributes(d, 0, index_count - 1, true,
+                                          vertex_size, index_count - 1);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BIND);
+ 
+         begin_pre_draw(pg);
+         void *inline_array_data = pg->inline_array;
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD, pg,
++            inline_array_data_size, index_count);
+         VkDeviceSize buffer_offset = pgraph_vk_update_vertex_inline_buffer(
+             pg, &inline_array_data, &inline_array_data_size, 1);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_UPLOAD);
+         pgraph_vk_begin_debug_marker(r, r->command_buffer, RGBA_BLUE,
+                                      "Inline Array");
+         begin_draw(pg);
+         bind_inline_vertex_buffer(pg, buffer_offset);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW, pg, index_count, 0);
+         vkCmdDraw(r->command_buffer, index_count, 1, 0, 0);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_ISSUE_DRAW);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW, pg, 0, 0);
+         end_draw(pg);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_END_DRAW);
+         pgraph_vk_end_debug_marker(r, r->command_buffer);
+         NV2A_VK_DGROUP_END();
+     } else {
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index 6be90bad65e22e0a087380ff3f01a326a3e7b386..c43276a0458b674089f0e01dafd17855742ec78f 100644
+index 4272bbc..fd8f9c2 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
-@@ -124,7 +124,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -19,6 +19,7 @@
+ 
+ #include "hw/xbox/nv2a/nv2a_int.h"
+ #include "renderer.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-flip-delay-trace-hook.h"
+ 
+ #include "gloffscreen.h"
+ 
+@@ -117,13 +118,16 @@ static void pgraph_vk_process_pending(NV2AState *d)
+ {
+     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_begin(
++        &d->pgraph, XEMU_PGRAPH_FLIP_DELAY_RENDERER_VK);
++
+     if (qatomic_read(&r->downloads_pending) ||
+         qatomic_read(&r->download_dirty_surfaces_pending) ||
+         qatomic_read(&d->pgraph.sync_pending) ||
+         qatomic_read(&d->pgraph.flush_pending)
      ) {
          qemu_mutex_unlock(&d->pfifo.lock);
-         pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
 -        qemu_mutex_lock(&d->pgraph.lock);
 +        PGRAPH_LOCK(&d->pgraph);
          if (qatomic_read(&r->downloads_pending)) {
              pgraph_vk_process_pending_downloads(d);
          }
-@@ -137,7 +137,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -136,9 +140,10 @@ static void pgraph_vk_process_pending(NV2AState *d)
          if (qatomic_read(&d->pgraph.flush_pending)) {
              pgraph_vk_flush(d);
          }
@@ -1846,9 +2791,12 @@ index 6be90bad65e22e0a087380ff3f01a326a3e7b386..c43276a0458b674089f0e01dafd17855
 +        PGRAPH_UNLOCK(&d->pgraph);
          qemu_mutex_lock(&d->pfifo.lock);
      }
++    xemu_debug_tools_pgraph_flip_delay_renderer_gate_cancel();
  }
+ 
+ static void pgraph_vk_flip_stall(NV2AState *d)
 diff --git a/hw/xbox/nv2a/pgraph/vk/surface.c b/hw/xbox/nv2a/pgraph/vk/surface.c
-index 9d438f2d7b209d9f494dba09c6e55d44cdf2e55b..8fb0f9f9c9ac6bf672278013e43041928c6b3a02 100644
+index 9d438f2..8fb0f9f 100644
 --- a/hw/xbox/nv2a/pgraph/vk/surface.c
 +++ b/hw/xbox/nv2a/pgraph/vk/surface.c
 @@ -41,19 +41,19 @@ void pgraph_vk_set_surface_scale_factor(NV2AState *d, unsigned int scale)
@@ -1893,8 +2841,76 @@ index 9d438f2d7b209d9f494dba09c6e55d44cdf2e55b..8fb0f9f9c9ac6bf672278013e4304192
  
      if (wait_for_downloads) {
          qemu_mutex_lock(&d->pfifo.lock);
+diff --git a/hw/xbox/nv2a/pgraph/vk/vertex.c b/hw/xbox/nv2a/pgraph/vk/vertex.c
+index 1e84101..e94062b 100644
+--- a/hw/xbox/nv2a/pgraph/vk/vertex.c
++++ b/hw/xbox/nv2a/pgraph/vk/vertex.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "renderer.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-draw-trace-hook.h"
+ 
+ VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
+                                            VkDeviceSize size)
+@@ -47,23 +48,55 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
+ {
+     PGRAPHVkState *r = pg->vk_renderer_state;
+ 
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_SURFACE_DOWNLOAD, pg, 0, 0);
+     pgraph_vk_download_surfaces_in_range_if_dirty(pg, offset, size);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_SURFACE_DOWNLOAD);
+ 
++
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_OVERLAP_CHECK, pg, 0, 0);
+     size_t start_bit = offset / TARGET_PAGE_SIZE;
+     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
+     size_t nbits = end_bit - start_bit;
+ 
+     if (find_next_bit(r->uploaded_bitmap, start_bit + nbits, start_bit) <
+         end_bit) {
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_OVERLAP_CHECK);
++        xemu_debug_tools_pgraph_draw_trace_metric(
++            XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_OVERLAP_FINISHES, 1);
++        xemu_debug_tools_pgraph_draw_trace_stage_begin(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_DIRTY_FINISH, pg, 0, 0);
+         // Vertex data changed while building the draw list. Finish drawing
+         // before updating RAM buffer.
+         pgraph_vk_finish(pg, VK_FINISH_REASON_VERTEX_BUFFER_DIRTY);
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_DIRTY_FINISH);
++    } else {
++        xemu_debug_tools_pgraph_draw_trace_stage_end(
++            XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_OVERLAP_CHECK);
+     }
+ 
+     nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_1);
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_COPY, pg, 0, 0);
+     memcpy(r->storage_buffers[BUFFER_VERTEX_RAM].mapped + offset, data, size);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_COPY);
++    xemu_debug_tools_pgraph_draw_trace_metric(
++        XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_COPY_CALLS, 1);
++    xemu_debug_tools_pgraph_draw_trace_metric(
++        XEMU_DEBUG_TOOLS_PGRAPH_METRIC_VERTEX_COPY_BYTES, size);
+ 
++
++    xemu_debug_tools_pgraph_draw_trace_stage_begin(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BITMAP, pg, 0, 0);
+     bitmap_set(r->uploaded_bitmap, start_bit, nbits);
++    xemu_debug_tools_pgraph_draw_trace_stage_end(
++        XEMU_DEBUG_TOOLS_PGRAPH_DRAW_VK_VERTEX_BITMAP);
++
+ }
+ 
+ static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)
 diff --git a/hw/xbox/nv2a/ptimer.c b/hw/xbox/nv2a/ptimer.c
-index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f56c3d485 100644
+index 87b5484..0645216 100644
 --- a/hw/xbox/nv2a/ptimer.c
 +++ b/hw/xbox/nv2a/ptimer.c
 @@ -21,6 +21,11 @@
@@ -1909,9 +2925,9 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
  
  #define CLOCK_HIGH_MASK 0x1fffffffULL
  #define ALARM_MASK 0xffffffe0ULL
-@@ -54,11 +59,18 @@ void ptimer_reset(NV2AState *d)
-     d->ptimer.alarm_time = 0;
-     d->ptimer.time_offset = 0;
+@@ -62,11 +67,18 @@ void ptimer_reset(NV2AState *d)
+     d->ptimer.numerator = 1;
+     d->ptimer.denominator = 1;
      timer_del(&d->ptimer.timer);
 +    xemu_debug_tools_ptimer_trace_record(
 +        d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_TIMER_DELETE, 0, 0);
@@ -1928,24 +2944,54 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      ptimer_reset(d);
  }
  
-@@ -125,6 +137,11 @@ static void schedule_qemu_timer(NV2AState *d)
+@@ -129,6 +141,10 @@ static void schedule_qemu_timer(NV2AState *d)
+ {
+     if (!(d->ptimer.enabled_interrupts & NV_PTIMER_INTR_0_ALARM)) {
+         timer_del(&d->ptimer.timer);
++        xemu_debug_tools_ptimer_trace_record(
++            d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_SCHEDULE_DISABLED, 0, 0);
++        xemu_debug_tools_ptimer_trace_record(
++            d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_TIMER_DELETE, 0, 0);
+         return;
+     }
+ 
+@@ -137,10 +153,21 @@ static void schedule_qemu_timer(NV2AState *d)
+         ptimer_alarm_distance(reg_now, d->ptimer.alarm_time);
+ 
+     if (!diff_reg_time) {
++        const uint32_t previous = d->ptimer.pending_interrupts;
+         d->ptimer.pending_interrupts |= NV_PTIMER_INTR_0_ALARM;
+         d->ptimer.alarm_time =
+             get_next_alarm_time(reg_now, d->ptimer.alarm_time);
++        xemu_debug_tools_ptimer_irq_delivery_note_set(
++            d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts,
++            d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
+         nv2a_update_irq(d);
++        xemu_debug_tools_ptimer_trace_record(
++            d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_IRQ_SET,
++            d->ptimer.pending_interrupts, previous);
++        xemu_debug_tools_scheduler_trace_note_irq(
++            XEMU_DEBUG_TOOLS_SCHED_WAKE_PTIMER,
++            d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts);
++        xemu_debug_tools_ptimer_irq_latency_note_set(d);
+         diff_reg_time = ptimer_alarm_distance(reg_now, d->ptimer.alarm_time);
+     }
+ 
+@@ -150,6 +177,8 @@ static void schedule_qemu_timer(NV2AState *d)
  
      timer_mod(&d->ptimer.timer,
                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + diff_ns);
 +    xemu_debug_tools_ptimer_trace_record(
-+        d, (d->ptimer.enabled_interrupts & NV_PTIMER_INTR_EN_0_ALARM)
-+               ? XEMU_DEBUG_TOOLS_PTIMER_TRACE_SCHEDULE
-+               : XEMU_DEBUG_TOOLS_PTIMER_TRACE_SCHEDULE_DISABLED,
-+        0, 0);
++        d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_SCHEDULE, 0, 0);
  }
  
  static void ptimer_alarm_fired(void *opaque)
-@@ -132,10 +149,27 @@ static void ptimer_alarm_fired(void *opaque)
+@@ -157,11 +186,28 @@ static void ptimer_alarm_fired(void *opaque)
      NV2AState *d = (NV2AState *)opaque;
      uint64_t reg_now = get_reg_time(d);
  
 +    xemu_debug_tools_ptimer_trace_record(
-+        d, (d->ptimer.enabled_interrupts & NV_PTIMER_INTR_EN_0_ALARM)
++        d, (d->ptimer.enabled_interrupts & NV_PTIMER_INTR_0_ALARM)
 +               ? XEMU_DEBUG_TOOLS_PTIMER_TRACE_CALLBACK
 +               : XEMU_DEBUG_TOOLS_PTIMER_TRACE_CALLBACK_DISABLED,
 +        0, 0);
@@ -1953,7 +2999,8 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      if (is_alarm_reached(reg_now, d->ptimer.alarm_time)) {
 +        const uint32_t previous = d->ptimer.pending_interrupts;
          d->ptimer.pending_interrupts |= NV_PTIMER_INTR_0_ALARM;
-         d->ptimer.alarm_time = advance_alarm_epoch(d->ptimer.alarm_time);
+         d->ptimer.alarm_time =
+             get_next_alarm_time(reg_now, d->ptimer.alarm_time);
 +        xemu_debug_tools_ptimer_irq_delivery_note_set(
 +            d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts,
 +            d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
@@ -1968,29 +3015,29 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      }
  
      schedule_qemu_timer(d);
-@@ -151,10 +185,21 @@ uint64_t ptimer_read(void *opaque, hwaddr addr, unsigned int size)
-         if (timer_pending(&d->ptimer.timer)) {
-             uint64_t reg_now = get_reg_time(d);
-             if (is_alarm_reached(reg_now, d->ptimer.alarm_time)) {
-+                const uint32_t previous = d->ptimer.pending_interrupts;
-                 d->ptimer.pending_interrupts |= NV_PTIMER_INTR_0_ALARM;
-                 d->ptimer.alarm_time =
-                     advance_alarm_epoch(d->ptimer.alarm_time);
-+                xemu_debug_tools_ptimer_irq_delivery_note_set(
-+                    d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts,
-+                    d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
-                 nv2a_update_irq(d);
-+                xemu_debug_tools_ptimer_trace_record(
-+                    d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_IRQ_SET,
-+                    d->ptimer.pending_interrupts, previous);
-+                xemu_debug_tools_scheduler_trace_note_irq(
-+                    XEMU_DEBUG_TOOLS_SCHED_WAKE_PTIMER,
-+                    d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts);
-+                xemu_debug_tools_ptimer_irq_latency_note_set(d);
-                 schedule_qemu_timer(d);
-             }
+@@ -176,10 +222,21 @@ uint64_t ptimer_read(void *opaque, hwaddr addr, unsigned int size)
+     case NV_PTIMER_INTR_0: {
+         uint64_t reg_now = get_reg_time(d);
+         if (is_alarm_reached(reg_now, d->ptimer.alarm_time)) {
++            const uint32_t previous = d->ptimer.pending_interrupts;
+             d->ptimer.pending_interrupts |= NV_PTIMER_INTR_0_ALARM;
+             d->ptimer.alarm_time =
+                 get_next_alarm_time(reg_now, d->ptimer.alarm_time);
++            xemu_debug_tools_ptimer_irq_delivery_note_set(
++                d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts,
++                d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
+             nv2a_update_irq(d);
++            xemu_debug_tools_ptimer_trace_record(
++                d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_IRQ_SET,
++                d->ptimer.pending_interrupts, previous);
++            xemu_debug_tools_scheduler_trace_note_irq(
++                XEMU_DEBUG_TOOLS_SCHED_WAKE_PTIMER,
++                d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts);
++            xemu_debug_tools_ptimer_irq_latency_note_set(d);
+             schedule_qemu_timer(d);
          }
-@@ -195,36 +240,70 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+         r = d->ptimer.pending_interrupts;
+@@ -219,41 +276,80 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
      nv2a_reg_log_write(NV_PTIMER, addr, size, val);
  
      switch (addr) {
@@ -2013,13 +3060,13 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
 +    case NV_PTIMER_INTR_EN_0: {
 +        const uint32_t previous = d->ptimer.enabled_interrupts;
          d->ptimer.enabled_interrupts = val;
-         if (val && timer_pending(&d->ptimer.timer)) {
+         if (val & NV_PTIMER_INTR_0_ALARM) {
              uint64_t reg_now = get_reg_time(d);
              if (is_alarm_reached(reg_now, d->ptimer.alarm_time)) {
 +                const uint32_t previous_pending = d->ptimer.pending_interrupts;
                  d->ptimer.pending_interrupts |= NV_PTIMER_INTR_0_ALARM;
                  d->ptimer.alarm_time =
-                     advance_alarm_epoch(d->ptimer.alarm_time);
+                     get_next_alarm_time(reg_now, d->ptimer.alarm_time);
 +                xemu_debug_tools_ptimer_irq_delivery_note_set(
 +                    d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts,
 +                    d->pmc.pending_interrupts, d->pmc.enabled_interrupts);
@@ -2030,8 +3077,12 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
 +                    XEMU_DEBUG_TOOLS_SCHED_WAKE_PTIMER,
 +                    d->ptimer.pending_interrupts, d->ptimer.enabled_interrupts);
 +                xemu_debug_tools_ptimer_irq_latency_note_set(d);
-                 schedule_qemu_timer(d);
              }
+             schedule_qemu_timer(d);
+         } else {
+             timer_del(&d->ptimer.timer);
++            xemu_debug_tools_ptimer_trace_record(
++                d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_TIMER_DELETE, 0, 0);
          }
          nv2a_update_irq(d);
 -        break;
@@ -2067,11 +3118,7 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
 +        const uint32_t previous =
 +            PTIMER_REG_TIME_GET_TIME_0(d->ptimer.alarm_time);
          uint64_t reg_now = get_reg_time(d);
-         uint32_t now_low = PTIMER_REG_TIME_GET_TIME_0(reg_now);
-         uint32_t val_low = val & ALARM_MASK;
-@@ -234,6 +313,9 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
-         }
-         d->ptimer.alarm_time = target & PTIMER_REG_TIME_MASK;
+         d->ptimer.alarm_time = get_next_alarm_time(reg_now, val);
          schedule_qemu_timer(d);
 +        xemu_debug_tools_ptimer_trace_record(
 +            d, XEMU_DEBUG_TOOLS_PTIMER_TRACE_ALARM_WRITE,
@@ -2079,7 +3126,7 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      } break;
      case NV_PTIMER_TIME_0: {
          uint64_t current_reg_time = get_reg_time(d);
-@@ -244,6 +326,9 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+@@ -264,6 +360,9 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
          if (timer_pending(&d->ptimer.timer)) {
              schedule_qemu_timer(d);
          }
@@ -2089,7 +3136,7 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      } break;
      case NV_PTIMER_TIME_1: {
          uint64_t current_reg_time = get_reg_time(d);
-@@ -254,6 +339,9 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+@@ -274,6 +373,9 @@ void ptimer_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
          if (timer_pending(&d->ptimer.timer)) {
              schedule_qemu_timer(d);
          }
@@ -2099,8 +3146,38 @@ index 7dfa5341c372ed9acef598e0d80321b2e889e660..9d365804ff98d7b390e54074b7b9a96f
      } break;
      default:
          break;
+diff --git a/hw/xbox/nv2a/user.c b/hw/xbox/nv2a/user.c
+index 60437eb..5cebacc 100644
+--- a/hw/xbox/nv2a/user.c
++++ b/hw/xbox/nv2a/user.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "nv2a_int.h"
++#include "ui/xui/debug-tools/addons/diagnostics/pgraph-pusher-progress-trace-hook.h"
+ 
+ /* USER - PFIFO MMIO and DMA submission area */
+ uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
+@@ -90,9 +91,16 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+ 
+         if (channel_id == cur_channel_id) {
+             switch (addr & 0xFFFF) {
+-            case NV_USER_DMA_PUT:
++            case NV_USER_DMA_PUT: {
++                const uint32_t old_dma_put =
++                    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
++                const uint32_t dma_get =
++                    d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
+                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] = val;
++                xemu_debug_tools_pgraph_pusher_progress_note_dma_put(
++                    channel_id, dma_get, old_dma_put, (uint32_t)val);
+                 break;
++            }
+             case NV_USER_DMA_GET:
+                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] = val;
+                 break;
 diff --git a/hw/xbox/xbox_pci.c b/hw/xbox/xbox_pci.c
-index 2a01e13dfee9d07b4f429cd6da98760e89325c00..6c2209bebec999ccdc070fe80652542dde58c3e2 100644
+index 2a01e13..6c2209b 100644
 --- a/hw/xbox/xbox_pci.c
 +++ b/hw/xbox/xbox_pci.c
 @@ -43,6 +43,7 @@
@@ -2121,7 +3198,7 @@ index 2a01e13dfee9d07b4f429cd6da98760e89325c00..6c2209bebec999ccdc070fe80652542d
  }
  
 diff --git a/hw/xbox/xid-gamepad.c b/hw/xbox/xid-gamepad.c
-index 43d0d0ef5650ce0642bdb74bfaa73e8a3ea2e229..0c49d899664296b7ad9042077cec40ab92365e4b 100644
+index 43d0d0e..0c49d89 100644
 --- a/hw/xbox/xid-gamepad.c
 +++ b/hw/xbox/xid-gamepad.c
 @@ -20,6 +20,8 @@
@@ -2205,7 +3282,7 @@ index 43d0d0ef5650ce0642bdb74bfaa73e8a3ea2e229..0c49d899664296b7ad9042077cec40ab
  
  static const Property xid_properties[] = {
 diff --git a/hw/xbox/xid.c b/hw/xbox/xid.c
-index 3f6c751e24e61f059c93be8268bfaed04ad7650b..40c9f95b3bd0d365a35223aff9a983413154670c 100644
+index 396d811..a621f10 100644
 --- a/hw/xbox/xid.c
 +++ b/hw/xbox/xid.c
 @@ -20,6 +20,8 @@
@@ -2229,7 +3306,7 @@ index 3f6c751e24e61f059c93be8268bfaed04ad7650b..40c9f95b3bd0d365a35223aff9a98341
      assert(state);
      state->rumble_l = s->out_state.left_actuator_strength;
      state->rumble_r = s->out_state.right_actuator_strength;
-@@ -59,9 +66,30 @@ void update_input(USBXIDGamepadState *s)
+@@ -59,8 +66,30 @@ void update_input(USBXIDGamepadState *s)
          return;
      }
  
@@ -2248,28 +3325,26 @@ index 3f6c751e24e61f059c93be8268bfaed04ad7650b..40c9f95b3bd0d365a35223aff9a98341
 +            s->device_index, s, 1, 0);
 +    }
      assert(state);
--
 +    if (input_poll_trace) {
++        const uint32_t host_connected =
++            (state->type != INPUT_DEVICE_SDL_GAMEPAD ||
++             state->sdl_gamepad != NULL) ? 1u : 0u;
 +        xemu_debug_tools_controller_input_poll_trace_set_controller(
-+            state->sdl_joystick_id, state->type, state->connected ? 1 : 0);
-+        /* Host SDL state is refreshed by the UI thread outside the BQL. */
-+        xemu_debug_tools_controller_input_poll_trace_set_update_result(
-+            0, state->connected ? 0 : 1, 0);
++            state->sdl_joystick_id, state->type, host_connected);
 +        input_poll_stage =
 +            xemu_debug_tools_controller_input_poll_trace_stage_begin();
 +    }
+     xemu_input_update_controller(state);
  
      const int button_map_analog[6][2] = {
-         { GAMEPAD_A,     CONTROLLER_BUTTON_A     },
-@@ -101,11 +129,31 @@ void update_input(USBXIDGamepadState *s)
+@@ -101,11 +130,30 @@ void update_input(USBXIDGamepadState *s)
      s->in_state.sThumbLY = state->axis[CONTROLLER_AXIS_LSTICK_Y];
      s->in_state.sThumbRX = state->axis[CONTROLLER_AXIS_RSTICK_X];
      s->in_state.sThumbRY = state->axis[CONTROLLER_AXIS_RSTICK_Y];
 +
 +    if (input_poll_trace) {
 +        xemu_debug_tools_controller_input_poll_trace_stage_end(
-+            XEMU_DEBUG_TOOLS_INPUT_POLL_STAGE_INPUT_MAPPING,
-+            input_poll_stage);
++            XEMU_DEBUG_TOOLS_INPUT_POLL_STAGE_INPUT_MAPPING, input_poll_stage);
 +        input_poll_stage =
 +            xemu_debug_tools_controller_input_poll_trace_stage_begin();
 +    }
@@ -2323,7 +3398,7 @@ index 3f6c751e24e61f059c93be8268bfaed04ad7650b..40c9f95b3bd0d365a35223aff9a98341
 +        s->device_index, s, 0, 0);
  }
 diff --git a/include/qemu/main-loop.h b/include/qemu/main-loop.h
-index 80ab1098f6ceff7dfeeb843d920734737ad74fe9..2729bd272475447d1ac70606d3c82289e9cfd78a 100644
+index 80ab109..2729bd2 100644
 --- a/include/qemu/main-loop.h
 +++ b/include/qemu/main-loop.h
 @@ -451,8 +451,10 @@ void main_loop_poll_remove_notifier(Notifier *notify);
@@ -2339,7 +3414,7 @@ index 80ab1098f6ceff7dfeeb843d920734737ad74fe9..2729bd272475447d1ac70606d3c82289
  
  #endif
 diff --git a/include/qemu/timer.h b/include/qemu/timer.h
-index 83fba24f0f735f87b062bbece3a20c0e3560dcd1..4dc064b8d66a556f978b1ffaefc1211289ec7331 100644
+index 83fba24..4dc064b 100644
 --- a/include/qemu/timer.h
 +++ b/include/qemu/timer.h
 @@ -89,6 +89,11 @@ struct QEMUTimer {
@@ -2364,7 +3439,7 @@ index 83fba24f0f735f87b062bbece3a20c0e3560dcd1..4dc064b8d66a556f978b1ffaefc12112
   * timer_deinit:
   * @ts: the timer to be de-initialised
 diff --git a/system/cpus.c b/system/cpus.c
-index ef2d2f241faaa5d9da7b61caf04b5b0669e13bf3..d1ebbebef9b1b2e83ff5345c2ccb4126c98f0487 100644
+index ef2d2f2..d1ebbeb 100644
 --- a/system/cpus.c
 +++ b/system/cpus.c
 @@ -47,6 +47,8 @@
@@ -2411,7 +3486,7 @@ index ef2d2f241faaa5d9da7b61caf04b5b0669e13bf3..d1ebbebef9b1b2e83ff5345c2ccb4126
  
  void qemu_cond_wait_bql(QemuCond *cond)
 diff --git a/system/vl.c b/system/vl.c
-index f45bdc34586ad88f7c4c75025b69329e0de7ddf6..f757204e0c9f8600d2f669ab50ef1291378d04b6 100644
+index f45bdc3..f757204 100644
 --- a/system/vl.c
 +++ b/system/vl.c
 @@ -38,6 +38,7 @@
@@ -2481,7 +3556,7 @@ index f45bdc34586ad88f7c4c75025b69329e0de7ddf6..f757204e0c9f8600d2f669ab50ef1291
      }
  
 diff --git a/target/i386/tcg/system/seg_helper.c b/target/i386/tcg/system/seg_helper.c
-index 8c7856be81e24ef5f15ed45ee269969e5713149c..3fc05b877fc73344833ff8a7dbcd508ccb895323 100644
+index 8c7856b..3fc05b8 100644
 --- a/target/i386/tcg/system/seg_helper.c
 +++ b/target/i386/tcg/system/seg_helper.c
 @@ -26,6 +26,7 @@
@@ -2502,7 +3577,7 @@ index 8c7856be81e24ef5f15ed45ee269969e5713149c..3fc05b877fc73344833ff8a7dbcd508c
                        "Servicing hardware INT=0x%02x\n", intno);
          do_interrupt_x86_hardirq(env, intno, 1);
 diff --git a/target/i386/whpx/whpx-accel-ops.c b/target/i386/whpx/whpx-accel-ops.c
-index f75886128d0d35f057593eb0ca11224751d5976b..794e72eb03929f5f7a9245e7a687815756c26311 100644
+index f758861..794e72e 100644
 --- a/target/i386/whpx/whpx-accel-ops.c
 +++ b/target/i386/whpx/whpx-accel-ops.c
 @@ -14,10 +14,10 @@
@@ -2528,7 +3603,7 @@ index f75886128d0d35f057593eb0ca11224751d5976b..794e72eb03929f5f7a9245e7a6878157
  
  static const TypeInfo whpx_accel_ops_type = {
 diff --git a/target/i386/whpx/whpx-all.c b/target/i386/whpx/whpx-all.c
-index 6bf8d5f4bbbc30039905e63f22255838673d629f..573d91b8ca0467df50e317485e3ad2e395add0fd 100644
+index 6bf8d5f..573d91b 100644
 --- a/target/i386/whpx/whpx-all.c
 +++ b/target/i386/whpx/whpx-all.c
 @@ -32,6 +32,7 @@
@@ -2611,11 +3686,29 @@ index 6bf8d5f4bbbc30039905e63f22255838673d629f..573d91b8ca0467df50e317485e3ad2e3
  }
  
  /*
+diff --git a/tests/xbox/ptimer/meson.build b/tests/xbox/ptimer/meson.build
+index 94af2c7..d6bae4c 100644
+--- a/tests/xbox/ptimer/meson.build
++++ b/tests/xbox/ptimer/meson.build
+@@ -3,7 +3,12 @@ test_nv2a_ptimer = executable(
+   files(
+     'test-nv2a-ptimer.c',
+     'mock-nv2a-ptimer.c',
+-    meson.project_source_root() / 'hw/xbox/nv2a/ptimer.c'
++    meson.project_source_root() / 'hw/xbox/nv2a/ptimer.c',
++    meson.project_source_root() / 'ui/xui/debug-tools/addons/stubs/ptimer-trace-stub.c',
++    meson.project_source_root() / 'ui/xui/debug-tools/addons/stubs/qemu-timer-trace-stub.c',
++    meson.project_source_root() / 'ui/xui/debug-tools/addons/stubs/ptimer-irq-delivery-trace-stub.c',
++    meson.project_source_root() / 'ui/xui/debug-tools/addons/stubs/scheduler-trace-stub.c',
++    meson.project_source_root() / 'ui/xui/debug-tools/addons/stubs/pgraph-ptimer-latency-trace-stub.c'
+   ),
+   c_args: [
+     '-DCOMPILING_PER_TARGET',
 diff --git a/ui/xemu-input.c b/ui/xemu-input.c
-index af7ce780a2d3fd61283ce5a30a24e1064761c4d5..9414fb38610ae629d81c854ef078f38cb3f78440 100644
+index 4fbc863..cdb353e 100644
 --- a/ui/xemu-input.c
 +++ b/ui/xemu-input.c
-@@ -31,6 +31,8 @@
+@@ -31,9 +31,81 @@
  #include "xemu-input.h"
  #include "xemu-notifications.h"
  #include "xemu-settings.h"
@@ -2624,218 +3717,126 @@ index af7ce780a2d3fd61283ce5a30a24e1064761c4d5..9414fb38610ae629d81c854ef078f38c
  #include <stdio.h>
  #include <stdlib.h>
  
-@@ -362,12 +364,18 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
++static uint32_t xemu_debug_tools_input_button_getter(SDL_GamepadButton button)
++{
++    switch (button) {
++    case SDL_GAMEPAD_BUTTON_SOUTH: return XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_A;
++    case SDL_GAMEPAD_BUTTON_EAST: return XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_B;
++    case SDL_GAMEPAD_BUTTON_WEST: return XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_X;
++    case SDL_GAMEPAD_BUTTON_NORTH: return XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_Y;
++    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_LEFT;
++    case SDL_GAMEPAD_BUTTON_DPAD_UP: return XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_UP;
++    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_RIGHT;
++    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_DOWN;
++    case SDL_GAMEPAD_BUTTON_BACK: return XEMU_DEBUG_TOOLS_INPUT_GETTER_BACK;
++    case SDL_GAMEPAD_BUTTON_START: return XEMU_DEBUG_TOOLS_INPUT_GETTER_START;
++    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return XEMU_DEBUG_TOOLS_INPUT_GETTER_LEFT_SHOULDER;
++    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return XEMU_DEBUG_TOOLS_INPUT_GETTER_RIGHT_SHOULDER;
++    case SDL_GAMEPAD_BUTTON_LEFT_STICK: return XEMU_DEBUG_TOOLS_INPUT_GETTER_LEFT_STICK_BUTTON;
++    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return XEMU_DEBUG_TOOLS_INPUT_GETTER_RIGHT_STICK_BUTTON;
++    case SDL_GAMEPAD_BUTTON_GUIDE: return XEMU_DEBUG_TOOLS_INPUT_GETTER_GUIDE;
++    default: return XEMU_DEBUG_TOOLS_INPUT_GETTER_NONE;
++    }
++}
++
++static uint32_t xemu_debug_tools_input_axis_getter(SDL_GamepadAxis axis)
++{
++    switch (axis) {
++    case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_TRIGGER_LEFT;
++    case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_TRIGGER_RIGHT;
++    case SDL_GAMEPAD_AXIS_LEFTX: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_LEFT_X;
++    case SDL_GAMEPAD_AXIS_LEFTY: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_LEFT_Y;
++    case SDL_GAMEPAD_AXIS_RIGHTX: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_RIGHT_X;
++    case SDL_GAMEPAD_AXIS_RIGHTY: return XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_RIGHT_Y;
++    default: return XEMU_DEBUG_TOOLS_INPUT_GETTER_NONE;
++    }
++}
++
++static bool xemu_debug_tools_profiled_gamepad_button(SDL_Gamepad *gamepad,
++                                                       SDL_GamepadButton button)
++{
++    const bool trace =
++        xemu_debug_tools_controller_input_poll_trace_active() != 0;
++    const uint64_t start = trace
++        ? xemu_debug_tools_controller_input_poll_trace_stage_begin() : 0;
++    const bool value = SDL_GetGamepadButton(gamepad, button);
++    if (trace) {
++        xemu_debug_tools_controller_input_poll_trace_getter_end(
++            xemu_debug_tools_input_button_getter(button), start);
++    }
++    return value;
++}
++
++static Sint16 xemu_debug_tools_profiled_gamepad_axis(SDL_Gamepad *gamepad,
++                                                      SDL_GamepadAxis axis)
++{
++    const bool trace =
++        xemu_debug_tools_controller_input_poll_trace_active() != 0;
++    const uint64_t start = trace
++        ? xemu_debug_tools_controller_input_poll_trace_stage_begin() : 0;
++    const Sint16 value = SDL_GetGamepadAxis(gamepad, axis);
++    if (trace) {
++        xemu_debug_tools_controller_input_poll_trace_getter_end(
++            xemu_debug_tools_input_axis_getter(axis), start);
++    }
++    return value;
++}
++
++#define SDL_GetGamepadButton(gamepad, button) \
++    xemu_debug_tools_profiled_gamepad_button((gamepad), (button))
++#define SDL_GetGamepadAxis(gamepad, axis) \
++    xemu_debug_tools_profiled_gamepad_axis((gamepad), (axis))
++
+ #include "system/blockdev.h"
+ 
+ // #define DEBUG_INPUT
+@@ -359,6 +431,15 @@ void xemu_save_peripheral_settings(int player_index, int peripheral_index,
+ 
+ void xemu_input_process_sdl_events(const SDL_Event *event)
  {
-     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
-         DPRINTF("Controller Added: %d\n", event->gdevice.which);
++    if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
 +        xemu_debug_tools_controller_xid_trace_host_lifecycle(
 +            XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_ADDED, -1,
 +            event->gdevice.which, 0, NULL, NULL);
++    } else if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
++        xemu_debug_tools_controller_xid_trace_host_lifecycle(
++            XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_REMOVED, -1,
++            event->gdevice.which, 0, NULL, NULL);
++    }
+     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
+         DPRINTF("Controller Added: %d\n", event->gdevice.which);
  
-         // Attempt to open the added controller
+@@ -366,6 +447,9 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
          SDL_Gamepad *sdl_con;
          sdl_con = SDL_OpenGamepad(event->gdevice.which);
          if (sdl_con == NULL) {
-             DPRINTF("Could not open joystick %d as a Gamepad\n", event->gdevice.which);
 +            xemu_debug_tools_controller_xid_trace_host_lifecycle(
 +                XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_OPEN_FAILED, -1,
 +                event->gdevice.which, 0, NULL, NULL);
+             DPRINTF("Could not open joystick %d as a Gamepad\n", event->gdevice.which);
              return;
          }
- 
-@@ -378,6 +386,9 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
+@@ -388,6 +472,9 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
          char guid_buf[35] = { 0 };
-         SDL_GUIDToString(sdl_joystick_guid, guid_buf, sizeof(guid_buf));
-         DPRINTF("Opened %s (%s)\n", sdl_name, guid_buf);
+         SDL_GUIDToString(new_con->sdl_joystick_guid, guid_buf, sizeof(guid_buf));
+         DPRINTF("Opened %s (%s)\n", new_con->name, guid_buf);
 +        xemu_debug_tools_controller_xid_trace_host_lifecycle(
 +            XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_OPENED, -1,
-+            sdl_joystick_id, 0, sdl_name, guid_buf);
++            new_con->sdl_joystick_id, 0, new_con->name, guid_buf);
  
-         /* Info: Reconnect the same host GUID without guest XID re-enumeration. */
-         ControllerState *new_con = NULL;
-@@ -407,6 +418,11 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
-             memset(new_con->axis, 0, sizeof(new_con->axis));
-             xemu_input_bindings_reload_map(new_con);
+         QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
+         xemu_input_bindings_reload_map(new_con);
+@@ -648,6 +735,9 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
  
-+            xemu_debug_tools_controller_xid_trace_host_lifecycle(
-+                XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_PERSISTENT_REATTACHED,
-+                new_con->bound, new_con->sdl_joystick_id, 0,
-+                new_con->name, guid_buf);
+ #undef INVERT_AXIS
+ 
++    xemu_debug_tools_controller_xid_trace_host_state(
++        state->bound, state->sdl_joystick_id, state->buttons, state->axis);
 +
-             char buf[128];
-             snprintf(buf, sizeof(buf), "Reconnected '%s' to port %d",
-                      new_con->name, new_con->bound + 1);
-@@ -489,7 +505,13 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
-             if (iter->type != INPUT_DEVICE_SDL_GAMEPAD) continue;
- 
-             if (iter->sdl_joystick_id == event->gdevice.which) {
-+                char trace_guid[35] = { 0 };
-+                SDL_GUIDToString(iter->sdl_joystick_guid, trace_guid,
-+                                 sizeof(trace_guid));
-                 DPRINTF("Device removed: %s\n", iter->name);
-+                xemu_debug_tools_controller_xid_trace_host_lifecycle(
-+                    XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_GAMEPAD_REMOVED,
-+                    iter->bound, iter->sdl_joystick_id, 0, iter->name, trace_guid);
- 
-                 if (iter->bound >= 0) {
-                     /* Info: Keep the guest XID device present with neutral input while host hardware is absent. */
-@@ -502,6 +524,14 @@ void xemu_input_process_sdl_events(const SDL_Event *event)
-                     memset(iter->axis, 0, sizeof(iter->axis));
-                     iter->rumble_l = 0;
-                     iter->rumble_r = 0;
-+                    xemu_debug_tools_controller_xid_trace_host_state(
-+                        iter->bound, iter->sdl_joystick_id,
-+                        iter->buttons, iter->axis);
-+                    xemu_debug_tools_controller_xid_trace_host_lifecycle(
-+                        XEMU_DEBUG_TOOLS_CONTROLLER_XID_HOST_PERSISTENT_NEUTRAL,
-+                        iter->bound, iter->sdl_joystick_id, 0,
-+                        iter->name, trace_guid);
-+
-                     if (iter->sdl_gamepad) {
-                         SDL_RumbleGamepad(iter->sdl_gamepad, 0, 0, 0);
-                         SDL_CloseGamepad(iter->sdl_gamepad);
-@@ -668,6 +698,62 @@ XemuInputHostPollBatch *xemu_input_host_poll_prepare(void)
-     return batch;
+     // xemu_input_print_controller_state(state);
  }
  
-+static inline bool xemu_input_profiled_gamepad_button(
-+    SDL_Gamepad *gamepad, SDL_GamepadButton button, uint32_t getter,
-+    bool input_poll_trace)
-+{
-+    uint64_t start_ns = input_poll_trace
-+        ? xemu_debug_tools_controller_input_poll_trace_stage_begin() : 0;
-+    const bool value = SDL_GetGamepadButton(gamepad, button);
-+    if (input_poll_trace) {
-+        xemu_debug_tools_controller_input_poll_trace_getter_end(getter,
-+                                                                start_ns);
-+    }
-+    return value;
-+}
-+
-+static inline Sint16 xemu_input_profiled_gamepad_axis(
-+    SDL_Gamepad *gamepad, SDL_GamepadAxis axis, uint32_t getter,
-+    bool input_poll_trace)
-+{
-+    uint64_t start_ns = input_poll_trace
-+        ? xemu_debug_tools_controller_input_poll_trace_stage_begin() : 0;
-+    const Sint16 value = SDL_GetGamepadAxis(gamepad, axis);
-+    if (input_poll_trace) {
-+        xemu_debug_tools_controller_input_poll_trace_getter_end(getter,
-+                                                                start_ns);
-+    }
-+    return value;
-+}
-+
-+static const uint32_t xemu_input_host_poll_button_getters[15] = {
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_A,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_B,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_X,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_BUTTON_Y,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_LEFT,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_UP,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_RIGHT,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_DPAD_DOWN,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_BACK,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_START,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_LEFT_SHOULDER,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_RIGHT_SHOULDER,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_LEFT_STICK_BUTTON,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_RIGHT_STICK_BUTTON,
-+    XEMU_DEBUG_TOOLS_INPUT_GETTER_GUIDE,
-+};
-+
-+static const uint32_t
-+    xemu_input_host_poll_axis_getters[CONTROLLER_AXIS__COUNT] = {
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_TRIGGER_LEFT,
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_TRIGGER_RIGHT,
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_LEFT_X,
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_LEFT_Y,
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_RIGHT_X,
-+        XEMU_DEBUG_TOOLS_INPUT_GETTER_AXIS_RIGHT_Y,
-+    };
-+
- void xemu_input_host_poll_sample(XemuInputHostPollBatch *batch)
- {
-     if (batch == NULL) {
-@@ -679,16 +765,22 @@ void xemu_input_host_poll_sample(XemuInputHostPollBatch *batch)
-         uint16_t buttons = 0;
-         int16_t axis[CONTROLLER_AXIS__COUNT] = { 0 };
- 
-+        const bool input_poll_trace =
-+            xemu_debug_tools_controller_input_poll_trace_active() != 0;
-         for (int button = 0; button < 15; button++) {
--            if (SDL_GetGamepadButton(entry->sdl_gamepad,
--                                     entry->button_mapping[button])) {
-+            if (xemu_input_profiled_gamepad_button(
-+                    entry->sdl_gamepad, entry->button_mapping[button],
-+                    xemu_input_host_poll_button_getters[button],
-+                    input_poll_trace)) {
-                 buttons |= (uint16_t)(1u << button);
-             }
-         }
-         for (int axis_index = 0; axis_index < CONTROLLER_AXIS__COUNT;
-              axis_index++) {
--            axis[axis_index] = SDL_GetGamepadAxis(
--                entry->sdl_gamepad, entry->axis_mapping[axis_index]);
-+            axis[axis_index] = xemu_input_profiled_gamepad_axis(
-+                entry->sdl_gamepad, entry->axis_mapping[axis_index],
-+                xemu_input_host_poll_axis_getters[axis_index],
-+                input_poll_trace);
-         }
- 
-         for (int axis_index = CONTROLLER_AXIS_LSTICK_X;
-@@ -743,6 +835,8 @@ void xemu_input_host_poll_commit(XemuInputHostPollBatch *batch)
-         state->buttons = entry->buttons;
-         memcpy(state->axis, entry->axis, sizeof(state->axis));
-         state->last_input_updated_ts = entry->sampled_ts;
-+        xemu_debug_tools_controller_xid_trace_host_state(
-+            state->bound, state->sdl_joystick_id, state->buttons, state->axis);
-     }
- }
- 
-@@ -753,16 +847,41 @@ void xemu_input_host_poll_free(XemuInputHostPollBatch *batch)
- 
- void xemu_input_update_controller(ControllerState *state)
- {
-+    const int input_poll_trace =
-+        xemu_debug_tools_controller_input_poll_trace_active();
-+    uint64_t input_poll_stage = input_poll_trace
-+        ? xemu_debug_tools_controller_input_poll_trace_stage_begin() : 0;
-+
-     if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
-+        if (input_poll_trace) {
-+            xemu_debug_tools_controller_input_poll_trace_set_update_result(
-+                0, state->connected ? 0 : 1, 0);
-+            xemu_debug_tools_controller_input_poll_trace_stage_end(
-+                XEMU_DEBUG_TOOLS_INPUT_POLL_STAGE_UPDATE_GATE,
-+                input_poll_stage);
-+        }
-         return;
-     }
- 
-     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-     if (ABS(now - state->last_input_updated_ts) <
-         XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US) {
-+        if (input_poll_trace) {
-+            xemu_debug_tools_controller_input_poll_trace_set_update_result(
-+                0, 0, 1);
-+            xemu_debug_tools_controller_input_poll_trace_stage_end(
-+                XEMU_DEBUG_TOOLS_INPUT_POLL_STAGE_UPDATE_GATE,
-+                input_poll_stage);
-+        }
-         return;
-     }
- 
-+    if (input_poll_trace) {
-+        xemu_debug_tools_controller_input_poll_trace_set_update_result(1, 0, 0);
-+        xemu_debug_tools_controller_input_poll_trace_stage_end(
-+            XEMU_DEBUG_TOOLS_INPUT_POLL_STAGE_UPDATE_GATE, input_poll_stage);
-+    }
-+
-     if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
-         xemu_input_update_sdl_kbd_controller_state(state);
-     }
-@@ -867,7 +986,18 @@ void xemu_input_bind(int index, ControllerState *state, int save)
+@@ -683,7 +773,18 @@ void xemu_input_bind(int index, ControllerState *state, int save)
  
      // Unbind existing controller
      if (bound_controllers[index]) {
@@ -2855,7 +3856,7 @@ index af7ce780a2d3fd61283ce5a30a24e1064761c4d5..9414fb38610ae629d81c854ef078f38c
          Error *err = NULL;
  
          // Unbind any XMUs
-@@ -960,6 +1090,17 @@ void xemu_input_bind(int index, ControllerState *state, int save)
+@@ -776,6 +877,17 @@ void xemu_input_bind(int index, ControllerState *state, int save)
          object_unref(OBJECT(dev));
  
          state->device = usbhub_dev;
@@ -2874,7 +3875,7 @@ index af7ce780a2d3fd61283ce5a30a24e1064761c4d5..9414fb38610ae629d81c854ef078f38c
  }
  
 diff --git a/ui/xemu-notifications.h b/ui/xemu-notifications.h
-index f023eb350a9c26b4aa71f1988cbd6c185529591d..80c45e141dce2b616e83fc0dc78f880423a1759a 100644
+index f023eb3..80c45e1 100644
 --- a/ui/xemu-notifications.h
 +++ b/ui/xemu-notifications.h
 @@ -27,9 +27,15 @@
@@ -2894,10 +3895,10 @@ index f023eb350a9c26b4aa71f1988cbd6c185529591d..80c45e141dce2b616e83fc0dc78f8804
  #ifdef __cplusplus
  }
 diff --git a/ui/xemu.c b/ui/xemu.c
-index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c256ae059 100644
+index 18dc3b3..ba20fbb 100644
 --- a/ui/xemu.c
 +++ b/ui/xemu.c
-@@ -43,11 +43,13 @@
+@@ -43,11 +43,14 @@
  #include "system/runstate-action.h"
  #include "system/system.h"
  #include "xui/xemu-hud.h"
@@ -2908,10 +3909,11 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
  #include "xemu-version.h"
  #include "xemu-os-utils.h"
 +#include "xui/debug-tools/addons/Video-Recorder/video-recorder-c.h"
++#include "xui/debug-tools/addons/diagnostics/av-sync-trace-hook.h"
  
  #include "data/xemu_64x64.png.h"
  
-@@ -360,11 +362,19 @@ static void process_key(struct xemu_console *scon, SDL_KeyboardEvent *ev)
+@@ -360,11 +363,19 @@ static void process_key(struct xemu_console *scon, SDL_KeyboardEvent *ev)
      qkbd_state_key_event(scon->kbd, qcode, ev->type == SDL_EVENT_KEY_DOWN);
  }
  
@@ -2931,7 +3933,7 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
      int gui_key_modifier_pressed = get_mod_state();
      int gui_keysym = 0;
  
-@@ -425,6 +435,11 @@ static void handle_keyup(SDL_Event *ev)
+@@ -425,6 +436,11 @@ static void handle_keyup(SDL_Event *ev)
      struct xemu_console *scon = get_scon_from_window(ev->key.windowID);
      if (!scon) return;
  
@@ -2943,16 +3945,24 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
      scon->ignore_hotkeys = false;
      process_key(scon, &ev->key);
  }
-@@ -793,6 +808,8 @@ static void *vblank_timer_thread(void *opaque)
+@@ -751,6 +767,7 @@ static void process_vblank(struct xemu_console *scon)
+ {
+     assert(bql_locked());
+ 
++    xemu_debug_tools_av_sync_trace_note_vblank(vblank_interval_ns);
+     update_fps();
+ 
+ #if 0
+@@ -792,6 +809,8 @@ static void *vblank_timer_thread(void *opaque)
+             next_vblank = now;
          }
  
++        xemu_debug_tools_bql_trace_set_next_context(
++            XEMU_DEBUG_TOOLS_BQL_CONTEXT_UI_VBLANK);
          if (!qatomic_read(&qemu_exiting)) {
-+            xemu_debug_tools_bql_trace_set_next_context(
-+                XEMU_DEBUG_TOOLS_BQL_CONTEXT_UI_VBLANK);
-             bql_lock();
+             xemu_main_loop_lock();
              process_vblank(scon);
-             bql_unlock();
-@@ -826,7 +843,7 @@ static void report_stats(void)
+@@ -826,7 +845,7 @@ static void report_stats(void)
   * Renders the main interface. Usually called from the main thread,
   * but may sometimes be called from another thread.
   */
@@ -2961,7 +3971,7 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
  {
      static bool rendering;
      if (qatomic_xchg(&rendering, true) || qatomic_read(&qemu_exiting)) {
-@@ -853,6 +870,8 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -853,6 +872,8 @@ static void gl_render_frame(struct xemu_console *scon)
      assert(glGetError() == GL_NO_ERROR);
  
      if (tex == 0) {
@@ -2970,7 +3980,7 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
          xemu_main_loop_lock();
          // FIXME: Don't upload if notdirty
          xb_surface_gl_create_texture(scon->surface);
-@@ -878,14 +897,27 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -878,14 +899,27 @@ static void gl_render_frame(struct xemu_console *scon)
       * lock and perform rendering, but release before swap to avoid
       * possible lengthy blocking (for vsync).
       */
@@ -3000,19 +4010,18 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
          xemu_main_loop_lock();
          xb_surface_gl_destroy_texture(scon->surface);
          xemu_main_loop_unlock();
-@@ -911,6 +943,11 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -911,6 +945,10 @@ static void gl_render_frame(struct xemu_console *scon)
  #endif
      assert(glGetError() == GL_NO_ERROR);
  
 +    if (!playback_only) {
-+        /* Info: Run deferred Debug Tools work only outside BQL and modal playback callbacks. */
 +        xemu_hud_process_deferred_actions();
 +    }
 +
      qatomic_set(&rendering, false);
  
  #if DEBUG_XEMU_C
-@@ -918,13 +955,28 @@ static void gl_render_frame(struct xemu_console *scon)
+@@ -918,13 +956,28 @@ static void gl_render_frame(struct xemu_console *scon)
  #endif
  }
  
@@ -3043,15 +4052,15 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
              int width;
              int height;
              if (!SDL_GetWindowSizeInPixels(scon->real_window, &width,
-@@ -937,9 +989,18 @@ static bool event_watch_callback(void *userdata, SDL_Event *event)
+@@ -937,10 +990,19 @@ static bool event_watch_callback(void *userdata, SDL_Event *event)
          }
  #endif
          gl_render_frame(scon);
 -    } else if (event->type == SDL_EVENT_WINDOW_EXPOSED) {
 -        gl_render_frame(scon);
 +        return true; // Ignored
-+    }
-+
+     }
+ 
 +#if defined(_WIN32)
 +    /* Info: Modal Win32 move/resize callbacks present playback only; Debug Tools are not re-entered. */
 +    if ((event->type == SDL_EVENT_WINDOW_MOVED ||
@@ -3059,12 +4068,13 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
 +         event->type == SDL_EVENT_WINDOW_EXPOSED) &&
 +        xemu_hud_is_detached_window_id(event->window.windowID)) {
 +        gl_render_playback_frame(scon);
-     }
++    }
 +#endif
- 
++
      return true; // Ignored
  }
-@@ -953,6 +1014,8 @@ static void poll_events(struct xemu_console *scon)
+ 
+@@ -953,6 +1015,8 @@ static void poll_events(struct xemu_console *scon)
      xemu_hud_should_capture_kbd_mouse(&kbd, &mouse);
  
      while (SDL_PollEvent(ev)) {
@@ -3073,27 +4083,7 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
          xemu_main_loop_lock();
  
          // HUD must process events first so that if a controller is detached,
-@@ -1001,13 +1064,17 @@ static void poll_events(struct xemu_console *scon)
-         xemu_main_loop_unlock();
-     }
- 
--    xemu_main_loop_lock();
-+    /* SDL controller lifecycle events above and host sampling below execute
-+     * serially on this UI thread. Preparing the host-only snapshot therefore
-+     * does not need to pin qemu_main_loop_lock/BQL. commit() still revalidates
-+     * each captured ControllerState while the emulator lock is held. */
-     XemuInputHostPollBatch *host_input_batch =
-         xemu_input_host_poll_prepare();
--    xemu_main_loop_unlock();
- 
-     xemu_input_host_poll_sample(host_input_batch);
- 
-+    xemu_debug_tools_bql_trace_set_next_context(
-+        XEMU_DEBUG_TOOLS_BQL_CONTEXT_UI_INPUT_COMMIT);
-     xemu_main_loop_lock();
-     xemu_input_host_poll_commit(host_input_batch);
-     xemu_input_update_controllers();
-@@ -1438,6 +1505,8 @@ int main(int argc, char **argv)
+@@ -1428,6 +1492,8 @@ int main(int argc, char **argv)
      tcg_register_init_ctx();
      qemu_set_current_aio_context(qemu_get_aio_context());
  
@@ -3103,7 +4093,7 @@ index 34d7cdfb1833b1fb14ba6861c69ff22ed13ef293..aec2b9c18a4c81a4ddaedd129c6e6d0c
      xemu_input_init();
      xemu_main_loop_unlock();
 diff --git a/ui/xui/actions.cc b/ui/xui/actions.cc
-index 865b2eb478e4c7df05aefc3e7ddd4a5518953207..af7f07515d77a96a0bab7ed1ac705e43d8864f39 100644
+index 865b2eb..af7f075 100644
 --- a/ui/xui/actions.cc
 +++ b/ui/xui/actions.cc
 @@ -23,8 +23,10 @@
@@ -3126,7 +4116,7 @@ index 865b2eb478e4c7df05aefc3e7ddd4a5518953207..af7f07515d77a96a0bab7ed1ac705e43
  }
  
 diff --git a/ui/xui/gl-helpers.cc b/ui/xui/gl-helpers.cc
-index cdef85861fb6407cd1ba4ecb50491ab45d302201..ae163a27250073e5346232e764efc41e561c1522 100644
+index cdef858..ae163a2 100644
 --- a/ui/xui/gl-helpers.cc
 +++ b/ui/xui/gl-helpers.cc
 @@ -975,23 +975,26 @@ void RenderFramebuffer(GLint tex, int width, int height, bool flip)
@@ -3182,7 +4172,7 @@ index cdef85861fb6407cd1ba4ecb50491ab45d302201..ae163a27250073e5346232e764efc41e
  }
  
 diff --git a/ui/xui/gl-helpers.hh b/ui/xui/gl-helpers.hh
-index 82da963e6baaa06ca6191fb8cab14d7ee9b95580..81e52f3cc35c6753f99c098a075b41612975f8c1 100644
+index 82da963..81e52f3 100644
 --- a/ui/xui/gl-helpers.hh
 +++ b/ui/xui/gl-helpers.hh
 @@ -51,6 +51,7 @@ void RenderXmu(float frame_x, float frame_y, uint32_t primary_color,
@@ -3194,7 +4184,7 @@ index 82da963e6baaa06ca6191fb8cab14d7ee9b95580..81e52f3cc35c6753f99c098a075b4161
  void SaveScreenshot(GLuint tex, bool flip);
  void ScaleDimensions(int src_width, int src_height, int max_width, int max_height, int *out_width, int *out_height);
 diff --git a/ui/xui/input-manager.cc b/ui/xui/input-manager.cc
-index a18aa9f9ced1e2a253daf6dd5e310d9310d61195..3f676424ff33eeabe0013f8314919b9854c18036 100644
+index a18aa9f..a0be5c7 100644
 --- a/ui/xui/input-manager.cc
 +++ b/ui/xui/input-manager.cc
 @@ -2,6 +2,8 @@
@@ -3222,7 +4212,7 @@ index a18aa9f9ced1e2a253daf6dd5e310d9310d61195..3f676424ff33eeabe0013f8314919b98
                  continue;
              m_buttons |= iter->buttons;
              // We simply take any axis that is >10 % activation
-@@ -46,17 +50,35 @@ void InputManager::Update()
+@@ -46,16 +50,35 @@ void InputManager::Update()
          m_navigating_with_controller = false;
      }
  
@@ -3261,13 +4251,12 @@ index a18aa9f9ced1e2a253daf6dd5e310d9310d61195..3f676424ff33eeabe0013f8314919b98
  
 -    // Prevent controller events from going to the guest if they are being used
 -    // to navigate the HUD
--    xemu_input_set_test_mode(controller_focus_capture); // FIXME: Rename 'test mode'
-+    /* Info: Main xemu scenes own controller capture; detached tools do not. */    xemu_input_set_test_mode(controller_focus_capture); // FIXME: Rename 'test mode'
++    /* Info: Main xemu scenes own controller capture; detached tools do not. */
+     xemu_input_set_test_mode(controller_focus_capture); // FIXME: Rename 'test mode'
  
      // Update gamepad inputs
-     #define IM_SATURATE(V)                      (V < 0.0f ? 0.0f : V > 1.0f ? 1.0f : V)
 diff --git a/ui/xui/main-menu.cc b/ui/xui/main-menu.cc
-index 85997c1a5ed13dc205a117071178456b4c79e88b..9d74283aee5d8f1222f8f4132dc6c02c2549ffbe 100644
+index 85997c1..9d74283 100644
 --- a/ui/xui/main-menu.cc
 +++ b/ui/xui/main-menu.cc
 @@ -27,6 +27,8 @@
@@ -3313,7 +4302,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..9d74283aee5d8f1222f8f4132dc6c02c
                 rom_file_filters, 3, false, [this](const char *path) {
                     xemu_settings_set_string(&g_config.sys.files.eeprom_path, path);
 diff --git a/ui/xui/main.cc b/ui/xui/main.cc
-index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c4acf27a1 100644
+index ace02bc..db9a9cd 100644
 --- a/ui/xui/main.cc
 +++ b/ui/xui/main.cc
 @@ -39,6 +39,7 @@
@@ -3410,7 +4399,7 @@ index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c
      first_boot_window.Draw();
      monitor_window.Draw();
      apu_window.Draw();
-@@ -317,16 +360,39 @@ void xemu_hud_update(void)
+@@ -317,16 +360,34 @@ void xemu_hud_update(void)
      g_scene_mgr.Draw();
      if (!first_boot_window.is_open) notification_manager.Draw();
      g_snapshot_mgr.Draw();
@@ -3422,21 +4411,16 @@ index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c
  
 +void xemu_hud_build_detached_frames_unlocked()
 +{
-+    /* Every detached Debug Tools frame is built on the UI/GL thread only after
-+     * xemu.c releases qemu_main_loop_lock and BQL. Guest-state operations use
-+     * snapshot caches or short self-synchronized bridge transactions. */
 +    debug_tools_build_unlocked_detached_frames();
 +}
 +
 +void xemu_hud_process_deferred_actions()
 +{
-+    /* Info: Precreate detached windows post-present on the UI thread with BQL released. */
 +    static bool detached_windows_precreated = false;
 +    if (!detached_windows_precreated) {
 +        debug_tools_precreate_detached_windows();
 +        detached_windows_precreated = true;
 +    }
-+
 +    debug_tools_process_deferred_actions();
 +}
 +
@@ -3445,12 +4429,12 @@ index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c
      ImGui::Render();
      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
  
-+    /* Info: Render detached tools, then restore main OpenGL/ImGui contexts. */    debug_tools_render_detached_frames();
++    debug_tools_render_detached_frames();
 +
      if (g_vsync != g_config.display.window.vsync) {
          g_vsync = g_config.display.window.vsync;
          SDL_GL_SetSwapInterval(g_vsync ? 1 : 0);
-@@ -336,4 +402,6 @@ void xemu_hud_render()
+@@ -336,4 +397,6 @@ void xemu_hud_render()
          SaveScreenshot(g_tex, g_flip_req);
          g_screenshot_pending = false;
      }
@@ -3458,7 +4442,7 @@ index ace02bc7687846cae8e811e6b947526fa7a8d7bf..038860c6de987a4708c51e3cc1651a8c
 +    xemu_video_recorder_capture(g_tex, g_flip_req ? 1 : 0);
  }
 diff --git a/ui/xui/menubar.cc b/ui/xui/menubar.cc
-index 38e2d1b67fd331708789a5030cc91a90e260c388..20efc22afa4f2a3de657a03906bd849e5ae2a05b 100644
+index 38e2d1b..20efc22 100644
 --- a/ui/xui/menubar.cc
 +++ b/ui/xui/menubar.cc
 @@ -26,6 +26,7 @@
@@ -3479,7 +4463,7 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..20efc22afa4f2a3de657a03906bd849e
              if (nv2a_dbg_renderdoc_available()) {
                  ImGui::MenuItem("RenderDoc: Capture", NULL, &g_capture_renderdoc_frame);
 diff --git a/ui/xui/meson.build b/ui/xui/meson.build
-index 95d50cb303b394edc04ef00adb2ea976ddf54a40..42656dc8a97bfea63aa03386f0f9817be25a81f0 100644
+index 95d50cb..42656dc 100644
 --- a/ui/xui/meson.build
 +++ b/ui/xui/meson.build
 @@ -23,6 +23,8 @@ xemu_ss.add(files(
@@ -3492,7 +4476,7 @@ index 95d50cb303b394edc04ef00adb2ea976ddf54a40..42656dc8a97bfea63aa03386f0f9817b
    xemu_ss.add(files('update.cc', 'win32-dxgi-present.cc'))
  endif
 diff --git a/ui/xui/notifications.cc b/ui/xui/notifications.cc
-index f4c5179e231d90c6aa4c8f07cdc35bfcb9a1b83a..ec8424a84a3cc62c5a4668473ecc03eed7f89ce9 100644
+index f4c5179..ec8424a 100644
 --- a/ui/xui/notifications.cc
 +++ b/ui/xui/notifications.cc
 @@ -35,7 +35,15 @@ void NotificationManager::QueueNotification(const char *msg)
@@ -3559,7 +4543,7 @@ index f4c5179e231d90c6aa4c8f07cdc35bfcb9a1b83a..ec8424a84a3cc62c5a4668473ecc03ee
 +    notification_manager.QueueErrorWithAction(msg, action_label, action, opaque);
 +}
 diff --git a/ui/xui/notifications.hh b/ui/xui/notifications.hh
-index 77a97d5915161c74141279d94de8df5f9e4a00ec..9b09922383848f5c2b7932b1acdf5cddbb0cfed5 100644
+index 77a97d5..9b09922 100644
 --- a/ui/xui/notifications.hh
 +++ b/ui/xui/notifications.hh
 @@ -19,6 +19,7 @@
@@ -3594,8 +4578,108 @@ index 77a97d5915161c74141279d94de8df5f9e4a00ec..9b09922383848f5c2b7932b1acdf5cdd
      void Draw();
  
  private:
+diff --git a/ui/xui/popup-menu.cc b/ui/xui/popup-menu.cc
+index f80ce9f..7773143 100644
+--- a/ui/xui/popup-menu.cc
++++ b/ui/xui/popup-menu.cc
+@@ -32,6 +32,7 @@
+ #include "IconsFontAwesome6.h"
+ #include "../xemu-snapshots.h"
+ #include "main-menu.hh"
++#include "debug-tools/addons/game-library/game-library-menu-hook.h"
+ 
+ PopupMenuItemDelegate::~PopupMenuItemDelegate() {}
+ void PopupMenuItemDelegate::PushMenu(PopupMenu &menu) {}
+@@ -348,7 +349,11 @@ public:
+     void Show(const ImVec2 &direction) override
+     {
+         PopupMenu::Show(direction);
+-        PopulateGameList();
++        if (xemu_debug_tools_game_library_menu_available()) {
++            xemu_debug_tools_game_library_menu_prepare();
++        } else {
++            PopulateGameList();
++        }
+     }
+ 
+     bool DrawItems(PopupMenuItemDelegate &nav) override
+@@ -359,18 +364,56 @@ public:
+             ImGui::SetKeyboardFocusHere();
+         }
+ 
+-        for (const auto &[label, file_path] : sorted_file_names) {
+-            if (PopupMenuButton(label, ICON_FA_COMPACT_DISC)) {
+-                ActionLoadDiscFile(file_path.c_str());
++        if (xemu_debug_tools_game_library_menu_available()) {
++            const size_t count = xemu_debug_tools_game_library_menu_count();
++            char label[512] = {};
++            for (size_t i = 0; i < count; ++i) {
++                if (!xemu_debug_tools_game_library_menu_get_label(
++                        i, label, sizeof(label))) {
++                    continue;
++                }
++                if (PopupMenuButton(label, ICON_FA_COMPACT_DISC)) {
++                    if (xemu_debug_tools_game_library_menu_launch(i)) {
++                        nav.ClearMenuStack();
++                        pop = true;
++                    }
++                    break;
++                }
++            }
++
++            if (count == 0) {
++                ImGui::PushFont(g_font_mgr.m_menu_font);
++                ImGui::TextDisabled(
++                    xemu_debug_tools_game_library_menu_scanning()
++                        ? "Scanning game library..."
++                        : "No games found");
++                ImGui::PopFont();
++            }
++
++            ImGui::Separator();
++            if (PopupMenuButton("Open Full Game Library", ICON_FA_GAMEPAD)) {
++                xemu_debug_tools_game_library_menu_open_full();
+                 nav.ClearMenuStack();
+                 pop = true;
+             }
+-        }
++            if (!pop &&
++                PopupMenuButton("Refresh Library", ICON_FA_ARROWS_ROTATE)) {
++                xemu_debug_tools_game_library_menu_refresh();
++            }
++        } else {
++            for (const auto &[label, file_path] : sorted_file_names) {
++                if (PopupMenuButton(label, ICON_FA_COMPACT_DISC)) {
++                    ActionLoadDiscFile(file_path.c_str());
++                    nav.ClearMenuStack();
++                    pop = true;
++                }
++            }
+ 
+-        if (sorted_file_names.size() == 0) {
+-            if (PopupMenuButton("No games found", ICON_FA_SLIDERS)) {
+-                nav.ClearMenuStack();
+-                g_scene_mgr.PushScene(g_main_menu);
++            if (sorted_file_names.size() == 0) {
++                if (PopupMenuButton("No games found", ICON_FA_SLIDERS)) {
++                    nav.ClearMenuStack();
++                    g_scene_mgr.PushScene(g_main_menu);
++                }
+             }
+         }
+ 
+@@ -380,7 +423,8 @@ public:
+         return pop;
+     }
+ 
+-    void PopulateGameList() {
++    void PopulateGameList()
++    {
+         sorted_file_names.clear();
+         std::filesystem::path directory(g_config.general.games_dir);
+         std::error_code ec;
 diff --git a/ui/xui/xemu-hud.h b/ui/xui/xemu-hud.h
-index 0e812fef9414429f50fcbb2678ed66fa334f9eaa..85b782634be11edc1f3916a3455a1653a63a80c0 100644
+index 0e812fe..85b7826 100644
 --- a/ui/xui/xemu-hud.h
 +++ b/ui/xui/xemu-hud.h
 @@ -43,10 +43,14 @@ void xemu_main_loop_unlock(void);
@@ -3614,7 +4698,7 @@ index 0e812fef9414429f50fcbb2678ed66fa334f9eaa..85b782634be11edc1f3916a3455a1653
  #ifdef __cplusplus
  }
 diff --git a/util/main-loop.c b/util/main-loop.c
-index 42ecfb86bd3506b54016876f9d1be15207c57427..5c3591395346ab9d6078655c659780cd36f6218d 100644
+index 42ecfb8..5c35913 100644
 --- a/util/main-loop.c
 +++ b/util/main-loop.c
 @@ -35,6 +35,9 @@
@@ -3840,7 +4924,7 @@ index 42ecfb86bd3506b54016876f9d1be15207c57427..5c3591395346ab9d6078655c659780cd
  
  /* Functions to operate on the main QEMU AioContext.  */
 diff --git a/util/qemu-timer.c b/util/qemu-timer.c
-index 650030c98b1679d440722711c316fc458eddd0ac..bb91fe922eb5084e662c47714506ed32cb5391de 100644
+index 650030c..bb91fe9 100644
 --- a/util/qemu-timer.c
 +++ b/util/qemu-timer.c
 @@ -30,6 +30,8 @@
@@ -4073,3 +5157,31 @@ index 650030c98b1679d440722711c316fc458eddd0ac..bb91fe922eb5084e662c47714506ed32
          qemu_mutex_lock(&timer_list->active_timers_lock);
  
          progress = true;
+diff --git a/hw/ide/core.c b/hw/ide/core.c
+--- a/hw/ide/core.c
++++ b/hw/ide/core.c
+@@ -42,6 +42,7 @@
+ #include "system/replay.h"
+ #include "system/runstate.h"
+ #include "ide-internal.h"
++#include "../../ui/xui/debug-tools/addons/file-replace/file-replace-block.h"
+ #include "trace.h"
+ 
+ /* These values were based on a Seagate ST3500418AS but have been modified
+@@ -720,8 +721,14 @@
+     qemu_iovec_init_buf(&req->qiov, blk_blockalign(s->blk, iov->size),
+                         iov->size);
+ 
+-    aioreq = blk_aio_preadv(s->blk, sector_num << BDRV_SECTOR_BITS,
+-                            &req->qiov, 0, ide_buffered_readv_cb, req);
++    if (s->drive_kind == IDE_CD) {
++        aioreq = xemu_file_replace_aio_preadv(
++            s->blk, sector_num << BDRV_SECTOR_BITS, &req->qiov, 0,
++            ide_buffered_readv_cb, req);
++    } else {
++        aioreq = blk_aio_preadv(s->blk, sector_num << BDRV_SECTOR_BITS,
++                              &req->qiov, 0, ide_buffered_readv_cb, req);
++    }
+ 
+     QLIST_INSERT_HEAD(&s->buffered_requests, req, list);
+     return aioreq;

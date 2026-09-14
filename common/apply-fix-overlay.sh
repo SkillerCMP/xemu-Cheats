@@ -11,8 +11,8 @@ FIX_ROOT="$2"
 
 [[ -d "$SRC" ]] || { echo "FIX overlay: source root does not exist: $SRC" >&2; exit 1; }
 
-# Sort FIX paths by natural basename order so numeric patch bands behave as
-# intended: 10 -> 20 -> 30 -> 40 -> 300 (plain lexical sort can misorder numeric patch bands).
+# Sort optional FIX paths by natural basename order. Patch 300 is selected
+# separately as the foundation, then 10 -> 20 -> 30 -> 40 -> 50 are applied.
 sort_fix_paths_natural() {
   python3 -c '
 import os, re, sys
@@ -57,7 +57,10 @@ while IFS= read -r archive; do
   rm -rf "$TMP_FIX"
 done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.zip' -print | sort_fix_paths_natural)
 
-# Apply top-level source patches next, in natural numeric basename order. We prefer git apply
+# Apply top-level source patches next. Patch 300 is the integration/observation
+# foundation and is applied first; optional behavioral fixes 10/20/30/40/50 are
+# then applied in natural numeric order. This lets any subset of 10-50 be
+# removed without changing Patch 300 or its Debug Tools hooks. We prefer git apply
 # because it understands normal Git patches (including mode/binary metadata).
 # If git's stricter context matching rejects a text patch only because earlier
 # fixes shifted its hunk location, fall back to patch(1) with fuzz disabled.
@@ -98,7 +101,11 @@ while IFS= read -r patch_file; do
 
   rm -f "$GIT_LOG" "$PATCH_LOG"
   echo "FIX patch applied: $patch_name ($patch_method)"
-done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.patch' -print | sort_fix_paths_natural)
+done < <(
+  find "$FIX_ROOT" -maxdepth 1 -type f -name '300-CMP-PATCH-ADDITION.patch' -print
+  find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.patch' \
+    ! -name '300-CMP-PATCH-ADDITION.patch' -print | sort_fix_paths_natural
+)
 
 # Loose files are applied last and therefore have highest precedence. This
 # makes quick one-file experiments easy without rebuilding a fix-pack ZIP.

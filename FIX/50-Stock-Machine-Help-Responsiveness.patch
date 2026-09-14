@@ -1,0 +1,1386 @@
+diff --git a/tests/unit/xemu-stock-ui-golden.py b/tests/unit/xemu-stock-ui-golden.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..97b7fe4011f2d24ae4bb27673b066d5d907a1bf0
+--- /dev/null
++++ b/tests/unit/xemu-stock-ui-golden.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++"""Stock Machine/Help lock-boundary tests; no emulator, graphics driver or network.
++Compiles the packaged production bodies, replacing only their SDK/header boundary.
++Run with --root <source-root> [--compiler g++|clang++] [--sanitize].
++"""
++import argparse, pathlib, re, subprocess, tempfile, shutil
++p=argparse.ArgumentParser()
++p.add_argument('--root', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[2])
++p.add_argument('--compiler', default='g++')
++p.add_argument('--sanitize', action='store_true')
++p.add_argument('--dialog-platform', choices=['native','linux','windows','macos'], default='native')
++a=p.parse_args(); root=a.root.resolve(); ui=root/'ui/xui'
++def text(name): return (ui/name).read_text()
++def clean(s): return re.sub(r'^\s*#(?:include|pragma).*$', '', s, flags=re.M)
++def block(s, start, end): return s[s.index(start):s.index(end,s.index(start))]
++
++# Structural guards supplement the native stubs: nothing may move live guest
++# reads, mutations or BQL-sensitive callbacks into the host work queue.
++about=block(text('main-menu.cc'),'void MainMenuAboutView::Draw()', 'MainMenuTabButton::MainMenuTabButton')
++assert about.index('g_config.sys.files.bootrom_path') < about.index('HostUiUnlockedScope unlocked')
++assert 'g_config' not in about[about.index('HostUiUnlockedScope unlocked'):]
++assert 'wait_for(std::chrono::seconds(0))' in about
++assert 'result.generation == m_config_info_generation' in about
++compat=text('compat.cc')
++assert compat.index('xbe_headers.assign') < compat.index('HostUiUnlockedScope unlocked')
++token_commit = compat.index('if (token_changed)')
++unlocked = compat.index('HostUiUnlockedScope unlocked')
++assert 'xemu_settings_set_string' not in compat[unlocked:token_commit]
++assert 'send_job' not in compat and 'std::async' not in compat
++assert compat.index('report.Send()') > unlocked
++assert compat.index('report.Send()') < token_commit
++xc=(root/'ui/xemu.c').read_text()
++poll=block(xc,'static void poll_events(struct xemu_console *scon)', 'static void display_very_early_init')
++controller_update=poll.index('xemu_input_update_controllers();')
++final_unlock=poll.index('xemu_main_loop_unlock();', controller_update)
++host_actions=poll.index('xemu_hud_process_host_actions();')
++assert controller_update < final_unlock < host_actions
++assert 'xemu_main_loop_lock();\n                (*f)();\n                xemu_main_loop_unlock();' in text('misc.cc')
++assert text('reporting.cc').count('result_code = res;') == 1
++for f in ['main-menu.cc','menubar.cc','compat.cc','update.cc','widgets.cc']:
++    assert 'SDL_OpenURL(' not in text(f),f
++
++base=(root/'tests/unit/xemu-stock-ui-test-support.hh').read_text()
++# Header-only ABI substitution: the production bodies below are NOT reimplemented.
++parts=[base, clean(text('host-ui.hh')), clean(text('host-ui.cc')), clean(text('misc.cc'))]
++parts += [text('misc.hh')[text('misc.hh').index('static inline gchar *GetFileMD5Checksum'):]]
++parts += [block(text('main-menu.hh'),'class MainMenuAboutView','class MainMenuTabButton')]
++parts += [block(text('main-menu.cc'),'MainMenuAboutView::MainMenuAboutView()', 'MainMenuTabButton::MainMenuTabButton')]
++parts += [clean(text('reporting.hh'))]
++parts += [block(text('reporting.cc'),'CompatibilityReport::CompatibilityReport()', 'const std::string &CompatibilityReport::GetSerializedReport()')]
++parts += ['const char *compat_report_endpoint_url = "stub-only";\n']
++parts += [block(text('reporting.cc'),'bool CompatibilityReport::Send()', 'void CompatibilityReport::SetXbeData')]
++parts += [r"""
++const std::string &CompatibilityReport::GetSerializedReport() {
++    serialized = token + ":" + compat_comments + ":" + xbe_headers;
++    return serialized;
++}
++"""]
++parts += [clean(text('compat.hh')), clean(text('compat.cc'))]
++parts += [block(text('menubar.cc'),'#if defined(__APPLE__)', 'void ProcessKeyboardShortcuts')]
++parts += [text('menubar.cc')[text('menubar.cc').index('void ShowMainMenu()'):]]
++parts += [(root/'tests/unit/xemu-stock-ui-test-cases.hh').read_text()]
++with tempfile.TemporaryDirectory(prefix='xemu-stock-ui-') as d:
++    d=pathlib.Path(d); src=d/'test.cc'; src.write_text('\n'.join(parts))
++    exe=d/'test'
++    cmd=[a.compiler,'-std=c++17','-pthread','-Wall','-Wextra','-Werror',
++         '-Wno-unused-parameter','-Wno-missing-field-initializers',str(src),
++         '-l:libglib-2.0.so.0','-o',str(exe)]
++    if a.dialog_platform != 'native': cmd += ['-DSDL_PLATFORM_' + a.dialog_platform.upper()]
++    if a.sanitize: cmd += ['-O1','-g','-fno-omit-frame-pointer','-fsanitize=address,undefined']
++    else: cmd += ['-O2']
++    print('+', ' '.join(cmd), flush=True)
++    subprocess.run(cmd,check=True)
++    subprocess.run([str(exe),str(d)],check=True,timeout=30)
++print('PASS: stock Machine/Help source guards and exact-body native harness')
+diff --git a/tests/unit/xemu-stock-ui-test-cases.hh b/tests/unit/xemu-stock-ui-test-cases.hh
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf6c2fe95f86f883be9505feecda475d50d05326
+--- /dev/null
++++ b/tests/unit/xemu-stock-ui-test-cases.hh
+@@ -0,0 +1,141 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++static void wait_until(const std::function<bool()> &predicate) {
++    const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(4);
++    while(!predicate()) {
++        assert(std::chrono::steady_clock::now()<end);
++        std::this_thread::yield();
++    }
++}
++static void about_frame(MainMenuAboutView &v) {
++    xemu_main_loop_lock();v.Draw();assert(locked);xemu_main_loop_unlock();
++}
++static void report_frame(CompatibilityReporter &v) {
++    xemu_main_loop_lock();v.Draw();assert(locked);xemu_main_loop_unlock();
++}
++int main(int argc,char **argv) {
++    assert(argc==2);std::string dir=argv[1];
++    xemu_main_loop_lock();
++    {HostUiUnlockedScope scope;host_only();}
++    need_lock();
++    try {HostUiUnlockedScope scope;throw std::runtime_error("test");}catch(const std::exception &){}
++    need_lock();xemu_main_loop_unlock();
++    puts("PASS: scoped release/restoration, including exception");
++
++    std::vector<int> order;
++    QueueHostUiAction([&]{host_only();order.push_back(1);QueueHostUiAction([&]{order.push_back(3);});});
++    QueueHostUiAction([&]{host_only();order.push_back(2);});
++    ProcessHostUiActions();assert((order==std::vector<int>{1,2}));
++    ProcessHostUiActions();assert((order==std::vector<int>{1,2,3}));
++    {std::string url="https://test.invalid/original";OpenHostUrl(url.c_str());url="changed";}
++    assert(urls.empty());ProcessHostUiActions();assert(urls.back()=="https://test.invalid/original");
++    puts("PASS: post-present FIFO, nested enqueue and URL ownership (no network)");
++
++    std::string file=dir+"/a.bin", newfile=dir+"/b.bin";
++    {std::ofstream out(file);out<<"abc";}
++    {std::ofstream out(newfile);out<<"hello";}
++    std::string selected;
++    {
++        std::string name="Images",pattern="iso;xiso",location=file;
++        SDL_DialogFileFilter filter{name.c_str(),pattern.c_str()};
++        xemu_main_loop_lock();
++        ShowOpenFileDialog(&filter,1,location.c_str(),[&](const char *p){need_lock();selected=p;});
++        ShowSaveFileDialog(&filter,1,location.c_str(),[&](const char *p){need_lock();selected=p;});
++        ShowOpenFolderDialog(dir.c_str(),[&](const char *p){need_lock();selected=p;});
++        xemu_main_loop_unlock();
++        name="changed";pattern="*";location="missing";
++    }
++    assert(dialogs.empty());ProcessHostUiActions();assert(dialogs.size()==3);
++    assert(std::string(dialogs[0].filters[0].name)=="Images");
++    assert(std::string(dialogs[0].filters[0].pattern)=="iso;xiso");
++#if defined(SDL_PLATFORM_LINUX)
++    assert(std::string(dialogs[0].path)==dir);
++#else
++    assert(std::string(dialogs[0].path)==file);
++#endif
++    const char *chosen[]={newfile.c_str(),nullptr};
++    dialogs[0].callback(dialogs[0].userdata,chosen,0);assert(selected==newfile);
++    dialogs[1].callback(dialogs[1].userdata,nullptr,0); // cancellation
++    dialogs[2].callback(dialogs[2].userdata,chosen,0);
++    dialogs.clear();
++    puts("PASS: open/save/folder dialog path/filter lifetime, cancellation and locked callbacks");
++
++    {g_autofree gchar *hash=GetFileMD5Checksum(file.c_str());assert(std::string(hash)=="900150983cd24fb0d6963f7d28e17f72");}
++    assert(!GetFileMD5Checksum(nullptr));assert(!GetFileMD5Checksum(""));
++    assert(!GetFileMD5Checksum((dir+"/missing").c_str()));
++    assert(!GetFileMD5Checksum(dir.c_str())); // read error, not a partial digest
++    std::string large=dir+"/large.bin";
++    {std::ofstream out(large,std::ios::binary);for(int i=0;i<100001;++i)out.put(char(i));}
++    GChecksum *ref=g_checksum_new(G_CHECKSUM_MD5);
++    {std::ifstream in(large,std::ios::binary);std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)),{});g_checksum_update(ref,bytes.data(),bytes.size());}
++    {g_autofree gchar *hash=GetFileMD5Checksum(large.c_str());assert(std::string(hash)==g_checksum_get_string(ref));}
++    g_checksum_free(ref);
++    puts("PASS: real GLib MD5: known vector, multi-block file, missing/empty path and read error");
++
++    MainMenuAboutView about;
++    g_config.sys.files.bootrom_path=file.c_str();g_config.sys.files.flashrom_path=file.c_str();
++    hold_hash=true;hash_started=false;hash_reads=0;
++    about_frame(about);wait_until([]{return hash_started.load();});
++    assert(fields["##config_info"]=="Loading ROM hashes...");
++    for(int i=0;i<5;++i)about_frame(about);
++    assert(hash_reads==1); // still exactly one outstanding job
++    xemu_main_loop_lock();
++    g_config.sys.files.bootrom_path=newfile.c_str();g_config.sys.files.flashrom_path=newfile.c_str();
++    about.UpdateConfigInfoText();xemu_main_loop_unlock();
++    about_frame(about);assert(hash_reads==1);
++    hold_hash=false;
++    wait_until([&]{about_frame(about);return fields["##config_info"].find("5d41402abc4b2a76b9719d911017c592")!=std::string::npos;});
++    assert(fields["##config_info"].find("900150983cd24fb0d6963f7d28e17f72")==std::string::npos);
++    auto reads=hash_reads.load();for(int i=0;i<25;++i)about_frame(about);assert(hash_reads==reads);
++    puts("PASS: About never waits for hashing; one job, stale-result rejection and warm-cache reuse");
++
++    std::thread guest([]{
++        while(!guest_stop){xemu_main_loop_lock();++guest_steps;xemu_main_loop_unlock();std::this_thread::yield();}
++    });
++    visible_menu="Machine";clicked.clear();game_progress_check=true;actions.clear();
++    xemu_main_loop_lock();ShowMainMenu();need_lock();xemu_main_loop_unlock();
++    assert(actions.empty());
++    const std::vector<std::pair<std::string,std::string>> commands={
++        {"Pause","pause"},{"Screenshot","screenshot"},{"Create Snapshot","snapshot"},
++        {"Load 'Alpha'","load0"},{"Save 'Beta'","save2"},{"Eject Disc","eject"},
++        {"Load Disc...","load-disc"},{"Reset","reset"},{"Exit","exit"}};
++    for(auto &entry:commands){clicked=entry.first;xemu_main_loop_lock();ShowMainMenu();xemu_main_loop_unlock();assert(actions.back()==entry.second);}
++    auto count=actions.size();clicked="Load F6 (Unbound)";
++    xemu_main_loop_lock();ShowMainMenu();xemu_main_loop_unlock();assert(actions.size()==count);
++    visible_menu="Help";clicked="Help";game_progress_check=true;
++    xemu_main_loop_lock();ShowMainMenu();xemu_main_loop_unlock();ProcessHostUiActions();
++    assert(urls.back()=="https://xemu.app/docs/getting-started/");
++    guest_stop=true;guest.join();visible_menu.clear();clicked.clear();
++    puts("PASS: Machine/Help draw permits simulated guest progress; commands still locked and unbound slots disabled");
++
++    CompatibilityReporter reporter;
++    reporter.is_open=true;window_appearing=true;clicked.clear();send_count=0;
++    on_unlock=[]{std::fill(std::begin(guest_header_data),std::end(guest_header_data),9);};
++    report_frame(reporter);
++    assert(reporter.report.xbe_headers=="AQIDBA==");
++    assert(send_count==0); // Opening the window must never submit a report.
++    guest_stop=false;
++    std::thread report_guest([]{
++        while(!guest_stop){xemu_main_loop_lock();++guest_steps;xemu_main_loop_unlock();std::this_thread::yield();}
++    });
++    auto caller=std::this_thread::get_id();
++    http_probe=[&]{
++        assert(std::this_thread::get_id()==caller);host_only();
++        auto before=guest_steps.load();
++        wait_until([&]{return guest_steps.load()>before;});
++    };
++    clicked="Send";report_frame(reporter);
++    guest_stop=true;report_guest.join();http_probe=nullptr;
++    assert(sent_payload.find("AQIDBA==")!=std::string::npos);
++    assert(send_count==1 && reporter.send_result && !reporter.is_open);
++    assert(reporter.report.GetResultCode()==200);
++    clicked.clear();report_frame(reporter);assert(send_count==1);
++    puts("PASS: report header snapshot, no auto-send, same-thread HTTP outside guest lock (stub only)");
++
++    reporter.is_open=true;window_appearing=true;http_status=403;clicked="Send";
++    report_frame(reporter);
++    assert(!reporter.send_result && reporter.is_open && reporter.report.GetResultCode()==403);
++    clicked.clear();entered_token="new-token";report_frame(reporter);assert(committed_token=="new-token");
++    have_xbe=false;window_appearing=true;report_frame(reporter);assert(!reporter.is_xbe_identified);
++    puts("PASS: HTTP failure/status handling, synchronized token commit and missing-XBE early return");
++    puts("PASS: all exact-production-body stock UI tests");
++}
+diff --git a/tests/unit/xemu-stock-ui-test-support.hh b/tests/unit/xemu-stock-ui-test-support.hh
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b03e87454c0acc463b11a455ee266fc90950c85
+--- /dev/null
++++ b/tests/unit/xemu-stock-ui-test-support.hh
+@@ -0,0 +1,208 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// SDK boundary stubs only; tested production function bodies are inserted verbatim.
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cassert>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <cstdarg>
++#include <cfloat>
++#include <filesystem>
++#include <fstream>
++#include <functional>
++#include <future>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <set>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <utility>
++#include <vector>
++
++using gchar = char;
++using guchar = unsigned char;
++struct GChecksum;
++constexpr int G_CHECKSUM_MD5 = 0;
++extern "C" {
++GChecksum *g_checksum_new(int);
++void g_checksum_update(GChecksum *, const unsigned char *, long);
++const char *g_checksum_get_string(GChecksum *);
++void g_checksum_free(GChecksum *);
++char *g_strdup(const char *);
++char *g_strdup_printf(const char *, ...);
++void g_free(void *);
++char *g_base64_encode(const unsigned char *, size_t);
++}
++static void cleanup_gfree(void *p) { g_free(*static_cast<void **>(p)); }
++#define g_autofree __attribute__((cleanup(cleanup_gfree)))
++static thread_local bool locked = false;
++static std::mutex machine_mutex;
++static std::atomic<unsigned> guest_steps{0};
++static std::atomic<bool> guest_stop{false};
++static std::function<void()> on_unlock;
++void xemu_main_loop_lock() { assert(!locked); machine_mutex.lock(); locked = true; }
++void xemu_main_loop_unlock() {
++    assert(locked); locked = false; machine_mutex.unlock();
++    if (on_unlock) { auto f = std::move(on_unlock); on_unlock = {}; f(); }
++}
++static void need_lock() { assert(locked); }
++static void host_only() { assert(!locked); }
++static std::atomic<bool> hold_hash{false}, hash_started{false};
++static std::atomic<int> hash_reads{0};
++static FILE *qemu_fopen(const char *p, const char *m) {
++    host_only(); ++hash_reads; hash_started = true;
++    while (hold_hash) std::this_thread::yield();
++    return fopen(p,m);
++}
++using FileDialogCallback = std::function<void(const char *)>;
++struct SDL_Window {};
++struct SDL_DialogFileFilter {const char *name; const char *pattern;};
++using SDL_DialogFileCallback = void (*)(void *,const char *const *,int);
++static SDL_Window window;
++SDL_Window *xemu_get_window() { return &window; }
++struct MockDialog {SDL_DialogFileCallback callback; void *userdata; const SDL_DialogFileFilter *filters; int count; const char *path;};
++static std::vector<MockDialog> dialogs;
++void SDL_ShowOpenFileDialog(SDL_DialogFileCallback cb,void *data,SDL_Window *,const SDL_DialogFileFilter *f,int n,const char *path,bool) {
++    host_only(); dialogs.push_back({cb,data,f,n,path});
++}
++void SDL_ShowSaveFileDialog(SDL_DialogFileCallback cb,void *data,SDL_Window *,const SDL_DialogFileFilter *f,int n,const char *path) {
++    host_only(); dialogs.push_back({cb,data,f,n,path});
++}
++void SDL_ShowOpenFolderDialog(SDL_DialogFileCallback cb,void *data,SDL_Window *,const char *path,bool) {
++    host_only(); dialogs.push_back({cb,data,nullptr,0,path});
++}
++bool SDL_RunOnMainThread(void (*f)(void *),void *d,bool) {host_only();f(d);return true;}
++static std::vector<std::string> urls;
++bool SDL_OpenURL(const char *u) {host_only();urls.emplace_back(u);return true;}
++const char *SDL_GetPlatform() {return "test";}
++const char *xemu_get_cpu_info() {return "stub CPU";}
++const char *xemu_get_os_info() {return "stub OS";}
++constexpr int GL_VENDOR=1, GL_RENDERER=2, GL_VERSION=3, GL_SHADING_LANGUAGE_VERSION=4;
++const unsigned char *glGetString(int) {host_only();return reinterpret_cast<const unsigned char *>("stub GL");}
++static const char *xemu_version="test", *xemu_commit="test", *xemu_date="test";
++struct {float m_scale=1;} g_viewport_mgr;
++struct {void *m_fixed_width_font=nullptr;} g_font_mgr;
++struct Config {
++    struct {struct {const char *bootrom_path=""; const char *flashrom_path="";} files;} sys;
++    struct {const char *user_token="token";} general;
++    struct {int renderer=1,filtering=0; struct {bool auto_scale=false;int scale=1,fit=0,aspect_ratio=0;} ui;} display;
++} g_config;
++static std::string committed_token;
++void xemu_settings_set_string(const char **p,const char *s) {need_lock(); committed_token=s;*p=committed_token.c_str();}
++struct Error {};
++struct xbe {uint8_t *headers; unsigned headers_len;};
++static uint8_t guest_header_data[]={1,2,3,4};
++static xbe guest_xbe{guest_header_data,sizeof(guest_header_data)};
++static bool have_xbe=true;
++xbe *xemu_get_xbe_info() {need_lock(); return have_xbe ? &guest_xbe : nullptr;}
++class MainMenuTabView {public:virtual ~MainMenuTabView()=default;virtual void Draw()=0;};
++struct ImVec2 {float x,y;ImVec2(float x=0,float y=0):x(x),y(y){}};
++constexpr int ImGuiWindowFlags_NoCollapse=1,ImGuiWindowFlags_AlwaysAutoResize=2,ImGuiInputTextFlags_ReadOnly=4;
++static std::string visible_menu, clicked, entered_token;
++static bool window_appearing=true;
++static int disabled_depth=0;
++static std::vector<std::string> menu_stack;
++static std::vector<std::string> seen_labels;
++static std::map<std::string,std::string> fields;
++static bool game_progress_check=false;
++namespace ImGui {
++struct Style {ImVec2 WindowPadding{1,1},ItemSpacing{1,1};};
++static Style style;
++Style &GetStyle() {return style;}
++void check() {
++    if (!menu_stack.empty() && (menu_stack.front()=="Machine" || menu_stack.front()=="Help")) host_only();
++}
++bool BeginMainMenuBar() {return true;}
++void EndMainMenuBar() {}
++bool BeginMenu(const char *s) {
++    check();
++    if (menu_stack.empty()) {if(visible_menu!=s)return false; menu_stack.emplace_back(s);return true;}
++    if(std::string(s)=="Snapshot") {menu_stack.emplace_back(s);return true;}
++    return false;
++}
++void EndMenu() {check();menu_stack.pop_back();}
++bool MenuItem(const char *s,const char * = nullptr,bool=false,bool enabled=true) {
++    check();seen_labels.emplace_back(s);
++    if(game_progress_check && !menu_stack.empty()) {
++        auto before=guest_steps.load();
++        auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
++        while(guest_steps==before && std::chrono::steady_clock::now()<deadline) std::this_thread::yield();
++        assert(guest_steps>before);game_progress_check=false;
++    }
++    bool yes=enabled && clicked==s; if(yes)clicked.clear();return yes;
++}
++bool MenuItem(const char *s,const char *shortcut,bool *v) {bool yes=MenuItem(s,shortcut,*v,true);if(yes)*v=!*v;return yes;}
++void Separator(){check();}
++bool Combo(const char *,int *,const char *) {check();return false;}
++void SameLine(){check();}
++float GetWindowHeight(){return 24;}
++void SetNextWindowContentSize(ImVec2){}
++bool Begin(const char *,bool *,int){return true;}
++void End(){}
++bool IsWindowAppearing(){bool b=window_appearing;window_appearing=false;return b;}
++void TextWrapped(const char *,...){host_only();}
++void Text(const char *,...){host_only();}
++void TextUnformatted(const char *){host_only();}
++void Dummy(ImVec2){host_only();}
++void Columns(int,const char * = "",bool=false){host_only();}
++void SetColumnWidth(int,float){host_only();}
++float GetWindowWidth(){return 550;}
++float GetColumnWidth(){return 250;}
++void NextColumn(){host_only();}
++void SetNextItemWidth(float){host_only();}
++void PushFont(void *){host_only();}
++void PopFont(){host_only();}
++bool InputText(const char *,char *buf,size_t size,int) {
++    host_only();if(entered_token.empty() || disabled_depth)return false;
++    snprintf(buf,size,"%s",entered_token.c_str());entered_token.clear();return true;
++}
++bool InputTextMultiline(const char *id,char *buf,size_t,ImVec2,int) {host_only(); fields[id]=buf;return false;}
++float GetTextLineHeight(){return 12;}
++bool SmallButton(const char *s){host_only();return MenuItem(s);}
++bool TreeNode(const char *){host_only();return true;}
++void TreePop(){host_only();}
++void SetCursorPosX(float){host_only();}
++void SetItemDefaultFocus(){check();}
++bool Button(const char *s,ImVec2={}){host_only();if(disabled_depth)return false;return MenuItem(s);}
++void BeginDisabled(bool disabled){host_only();disabled_depth+=disabled?1:0;}
++void EndDisabled(){host_only();disabled_depth=0;}
++}
++void Logo(){host_only();}
++void SectionTitle(const char *){host_only();}
++void HelpMarker(const char *){ImGui::check();}
++struct StubMenu {void ShowSettings(){need_lock();}void ShowAbout(){need_lock();}} g_main_menu;
++struct {bool is_open=false;void ToggleOpen(){}} monitor_window;
++struct {bool m_is_open=false;} apu_window,video_window;
++static std::vector<std::string> actions;
++bool runstate_is_running(){need_lock();return true;}
++void ActionTogglePause(){need_lock();actions.emplace_back("pause");}
++void ActionScreenshot(){need_lock();actions.emplace_back("screenshot");}
++void ActionEjectDisc(){need_lock();actions.emplace_back("eject");}
++void ActionLoadDisc(){need_lock();actions.emplace_back("load-disc");}
++void ActionReset(){need_lock();actions.emplace_back("reset");}
++void ActionShutdown(){need_lock();actions.emplace_back("exit");}
++void ActionActivateBoundSnapshot(int i,bool save){need_lock();actions.emplace_back(std::string(save?"save":"load")+std::to_string(i));}
++void xemu_snapshots_save(const char *,Error **){need_lock();actions.emplace_back("snapshot");}
++void xemu_queue_notification(const char *){need_lock();}
++static const char *snapshot_names[4]={"Alpha","","Beta","Gamma"};
++static const char **g_snapshot_shortcut_index_key_map[4]={&snapshot_names[0],&snapshot_names[1],&snapshot_names[2],&snapshot_names[3]};
++float g_main_menu_height=0;
++int nv2a_get_surface_scale_factor(){need_lock();return 1;}
++void nv2a_set_surface_scale_factor(int){need_lock();}
++int xemu_is_fullscreen(){return false;}
++void xemu_toggle_fullscreen(){need_lock();}
++void debug_tools_draw_menu_items(){need_lock();}
++static std::function<void()> http_probe;
++static std::atomic<int> http_status{200},send_count{0};
++static std::string sent_payload;
++int http_post_json(const char *,const char *s,void *) {
++    host_only();sent_payload=s;++send_count;
++    if (http_probe) http_probe();
++    return http_status;
++}
+diff --git a/ui/xemu.c b/ui/xemu.c
+--- a/ui/xemu.c
++++ b/ui/xemu.c
+@@ -1007,3 +1007,5 @@
+-}
++    /* Host dialogs/URLs run only after guest-sensitive event work releases BQL. */
++    xemu_hud_process_host_actions();
++}
+ 
+ static void display_very_early_init(DisplayOptions *o)
+diff --git a/ui/xui/compat.cc b/ui/xui/compat.cc
+index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c292a767fda 100644
+--- a/ui/xui/compat.cc
++++ b/ui/xui/compat.cc
+@@ -17,9 +17,11 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include <string>
++#include <vector>
+ #include "common.hh"
+ #include "compat.hh"
+ #include "widgets.hh"
++#include "host-ui.hh"
+ #include "viewport-manager.hh"
+ #include "font-manager.hh"
+ #include "xemu-version.h"
+@@ -73,147 +75,164 @@ void CompatibilityReporter::Draw()
+         return;
+     }
+ 
+-    if (ImGui::IsWindowAppearing()) {
+-        report.gl_vendor = (const char *)glGetString(GL_VENDOR);
+-        report.gl_renderer = (const char *)glGetString(GL_RENDERER);
+-        report.gl_version = (const char *)glGetString(GL_VERSION);
+-        report.gl_shading_language_version = (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
++    const bool appearing = ImGui::IsWindowAppearing();
++    std::vector<uint8_t> xbe_headers;
++    std::string saved_token;
++    if (appearing) {
++        // Copy headers before releasing the guest lock.
+         struct xbe *xbe = xemu_get_xbe_info();
+-        is_xbe_identified = xbe != NULL;
++        is_xbe_identified = xbe && xbe->headers && xbe->headers_len > 0;
+         if (is_xbe_identified) {
+-            report.SetXbeData(xbe);
++            xbe_headers.assign(xbe->headers, xbe->headers + xbe->headers_len);
+         }
+-        did_send = send_result = false;
+-
+-        playability = 3; // Playable
+-        report.compat_rating = playability_names[playability];
+-        description[0] = '\x00';
+-        report.compat_comments = description;
+-
+-        strncpy(token_buf, g_config.general.user_token, sizeof(token_buf)-1);
+-        report.token = token_buf;
+-
+-        dirty = true;
++        if (g_config.general.user_token) saved_token = g_config.general.user_token;
+     }
++    bool token_changed = false;
++    {
++        HostUiUnlockedScope unlocked;
++        if (appearing) {
++            report.gl_vendor = (const char *)glGetString(GL_VENDOR);
++            report.gl_renderer = (const char *)glGetString(GL_RENDERER);
++            report.gl_version = (const char *)glGetString(GL_VERSION);
++            report.gl_shading_language_version = (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
++            report.xbe_headers.clear();
++            if (is_xbe_identified) {
++                g_autofree gchar *encoded = g_base64_encode(xbe_headers.data(), xbe_headers.size());
++                report.xbe_headers = encoded;
++            }
++            did_send = send_result = false;
++
++            playability = 3; // Playable
++            report.compat_rating = playability_names[playability];
++            description[0] = '\x00';
++            report.compat_comments = description;
++
++            snprintf(token_buf, sizeof(token_buf), "%s", saved_token.c_str());
++            report.token = token_buf;
++
++            dirty = true;
++        }
+ 
+-    if (!is_xbe_identified) {
+-        ImGui::TextWrapped(
+-            "An XBE could not be identified. Please launch an official "
+-            "Xbox title to submit a compatibility report.");
+-        ImGui::End();
+-        return;
+-    }
++        if (!is_xbe_identified) {
++            ImGui::TextWrapped(
++                "An XBE could not be identified. Please launch an official "
++                "Xbox title to submit a compatibility report.");
++            ImGui::End();
++            return;
++        }
+ 
+-    ImGui::TextWrapped(
+-        "If you would like to help improve xemu by submitting a compatibility report for this "
+-        "title, please select an appropriate playability level, enter a "
+-        "brief description, then click 'Send'."
+-        "\n\n"
+-        "Note: By submitting a report, you acknowledge and consent to "
+-        "collection, archival, and publication of information as outlined "
+-        "in 'Privacy Disclosure' below.");
+-
+-    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
+-    ImGui::Separator();
+-    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
+-
+-    ImGui::Columns(2, "", false);
+-    ImGui::SetColumnWidth(0, ImGui::GetWindowWidth()*0.25);
+-
+-    ImGui::Text("User Token");
+-    ImGui::SameLine();
+-    HelpMarker("This is a unique access token used to authorize submission of the report. To request a token, click 'Get Token'.");
+-    ImGui::NextColumn();
+-    float item_width = ImGui::GetColumnWidth()*0.75-20*g_viewport_mgr.m_scale;
+-    ImGui::SetNextItemWidth(item_width);
+-    ImGui::PushFont(g_font_mgr.m_fixed_width_font);
+-    if (ImGui::InputText("###UserToken", token_buf, sizeof(token_buf), 0)) {
+-        xemu_settings_set_string(&g_config.general.user_token, token_buf);
+-        report.token = token_buf;
+-        dirty = true;
+-    }
+-    ImGui::PopFont();
+-    ImGui::SameLine();
+-    if (ImGui::Button("Get Token")) {
+-        SDL_OpenURL("https://reports.xemu.app");
+-    }
+-    ImGui::NextColumn();
+-
+-    ImGui::Text("Playability");
+-    ImGui::NextColumn();
+-    ImGui::SetNextItemWidth(item_width);
+-    if (ImGui::Combo("###PlayabilityRating", &playability,
+-        "Broken\0" "Intro/Menus\0" "Starts\0" "Playable\0" "Perfect\0")) {
+-        report.compat_rating = playability_names[playability];
+-        dirty = true;
+-    }
+-    ImGui::SameLine();
+-    HelpMarker(playability_descriptions[playability]);
+-    ImGui::NextColumn();
++        ImGui::TextWrapped(
++            "If you would like to help improve xemu by submitting a compatibility report for this "
++            "title, please select an appropriate playability level, enter a "
++            "brief description, then click 'Send'."
++            "\n\n"
++            "Note: By submitting a report, you acknowledge and consent to "
++            "collection, archival, and publication of information as outlined "
++            "in 'Privacy Disclosure' below.");
+ 
+-    ImGui::Columns(1);
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++        ImGui::Separator();
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
+ 
+-    ImGui::Text("Description");
+-    if (ImGui::InputTextMultiline("###desc", description, sizeof(description), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 6), 0)) {
+-        report.compat_comments = description;
+-        dirty = true;
+-    }
++        ImGui::Columns(2, "", false);
++        ImGui::SetColumnWidth(0, ImGui::GetWindowWidth()*0.25);
+ 
+-    if (ImGui::TreeNode("Report Details")) {
++        ImGui::Text("User Token");
++        ImGui::SameLine();
++        HelpMarker("This is a unique access token used to authorize submission of the report. To request a token, click 'Get Token'.");
++        ImGui::NextColumn();
++        float item_width = ImGui::GetColumnWidth()*0.75-20*g_viewport_mgr.m_scale;
++        ImGui::SetNextItemWidth(item_width);
+         ImGui::PushFont(g_font_mgr.m_fixed_width_font);
+-        if (dirty) {
+-            serialized_report = report.GetSerializedReport();
+-            dirty = false;
++        if (ImGui::InputText("###UserToken", token_buf, sizeof(token_buf), 0)) {
++            token_changed = true;
++            report.token = token_buf;
++            dirty = true;
+         }
+-        ImGui::InputTextMultiline("##build_info", (char*)serialized_report.c_str(), strlen(serialized_report.c_str())+1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 7), ImGuiInputTextFlags_ReadOnly);
+         ImGui::PopFont();
+-        ImGui::TreePop();
+-    }
++        ImGui::SameLine();
++        if (ImGui::Button("Get Token")) {
++            OpenHostUrl("https://reports.xemu.app");
++        }
++        ImGui::NextColumn();
++
++        ImGui::Text("Playability");
++        ImGui::NextColumn();
++        ImGui::SetNextItemWidth(item_width);
++        if (ImGui::Combo("###PlayabilityRating", &playability,
++            "Broken\0" "Intro/Menus\0" "Starts\0" "Playable\0" "Perfect\0")) {
++            report.compat_rating = playability_names[playability];
++            dirty = true;
++        }
++        ImGui::SameLine();
++        HelpMarker(playability_descriptions[playability]);
++        ImGui::NextColumn();
+ 
+-    if (ImGui::TreeNode("Privacy Disclosure (Please read before submission!)")) {
+-        ImGui::TextWrapped(
+-            "By volunteering to submit a compatibility report, basic information about your "
+-            "computer is collected, including: your operating system version, CPU model, "
+-            "graphics card/driver information, and details about the title which are "
+-            "extracted from the executable in memory. The contents of this report can be "
+-            "seen before submission by expanding 'Report Details'."
+-            "\n\n"
+-            "Like many websites, upon submission, the public IP address of your computer is "
+-            "also recorded with your report. If provided, the identity associated with your "
+-            "token is also recorded."
+-            "\n\n"
+-            "This information will be archived and used to analyze, resolve problems with, "
+-            "and improve the application. This information may be made publicly visible, "
+-            "for example: to anyone who wishes to see the playability status of a title, as "
+-            "indicated by your report.");
+-        ImGui::TreePop();
+-    }
++        ImGui::Columns(1);
+ 
+-    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
+-    ImGui::Separator();
+-    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++        ImGui::Text("Description");
++        if (ImGui::InputTextMultiline("###desc", description, sizeof(description), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 6), 0)) {
++            report.compat_comments = description;
++            dirty = true;
++        }
+ 
+-    if (did_send) {
+-        if (send_result) {
+-            ImGui::Text("Sent! Thanks.");
+-        } else {
+-            ImGui::Text("Error: %s (%d)", report.GetResultMessage().c_str(), report.GetResultCode());
++        if (ImGui::TreeNode("Report Details")) {
++            ImGui::PushFont(g_font_mgr.m_fixed_width_font);
++            if (dirty) {
++                serialized_report = report.GetSerializedReport();
++                dirty = false;
++            }
++            ImGui::InputTextMultiline("##build_info", (char*)serialized_report.c_str(), strlen(serialized_report.c_str())+1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 7), ImGuiInputTextFlags_ReadOnly);
++            ImGui::PopFont();
++            ImGui::TreePop();
+         }
+-        ImGui::SameLine();
+-    }
+ 
+-    ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+10)*g_viewport_mgr.m_scale);
++        if (ImGui::TreeNode("Privacy Disclosure (Please read before submission!)")) {
++            ImGui::TextWrapped(
++                "By volunteering to submit a compatibility report, basic information about your "
++                "computer is collected, including: your operating system version, CPU model, "
++                "graphics card/driver information, and details about the title which are "
++                "extracted from the executable in memory. The contents of this report can be "
++                "seen before submission by expanding 'Report Details'."
++                "\n\n"
++                "Like many websites, upon submission, the public IP address of your computer is "
++                "also recorded with your report. If provided, the identity associated with your "
++                "token is also recorded."
++                "\n\n"
++                "This information will be archived and used to analyze, resolve problems with, "
++                "and improve the application. This information may be made publicly visible, "
++                "for example: to anyone who wishes to see the playability status of a title, as "
++                "indicated by your report.");
++            ImGui::TreePop();
++        }
+ 
+-    ImGui::SetItemDefaultFocus();
+-    if (ImGui::Button("Send", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
+-        did_send = true;
+-        send_result = report.Send();
+-        if (send_result) {
+-            is_open = false;
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++        ImGui::Separator();
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++
++        if (did_send) {
++            if (send_result) {
++                ImGui::Text("Sent! Thanks.");
++            } else {
++                ImGui::Text("Error: %s (%d)", report.GetResultMessage().c_str(), report.GetResultCode());
++            }
++            ImGui::SameLine();
+         }
+-    }
+ 
+-    ImGui::End();
++        ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+10)*g_viewport_mgr.m_scale);
++
++        ImGui::SetItemDefaultFocus();
++        if (ImGui::Button("Send", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
++            // Keep HTTP host-only; do not pin the guest behind BQL.
++            did_send = true;
++            send_result = report.Send();
++            if (send_result) is_open = false;
++        }
++
++        ImGui::End();
++    }
++    // Commit settings after the host-only scope.
++    if (token_changed) xemu_settings_set_string(&g_config.general.user_token, token_buf);
+ }
+ 
+ CompatibilityReporter compatibility_reporter_window;
+diff --git a/ui/xui/host-ui.cc b/ui/xui/host-ui.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..7daf50c89a42e1dd636923cbe4412c8316d4f4d0
+--- /dev/null
++++ b/ui/xui/host-ui.cc
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "common.hh"
++#include "host-ui.hh"
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace {
++std::vector<std::function<void()>> host_actions;
++}
++
++void QueueHostUiAction(std::function<void()> action)
++{
++    host_actions.push_back(std::move(action));
++}
++
++void ProcessHostUiActions()
++{
++    // Defer nested actions to the next frame.
++    std::vector<std::function<void()>> pending;
++    pending.swap(host_actions);
++    for (auto &action : pending) {
++        action();
++    }
++}
++
++void OpenHostUrl(const char *url)
++{
++    if (url && *url) {
++        QueueHostUiAction([url = std::string(url)] { SDL_OpenURL(url.c_str()); });
++    }
++}
+diff --git a/ui/xui/host-ui.hh b/ui/xui/host-ui.hh
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b51eebccc1b4ae0b708cd9be7f6d74b999c1535
+--- /dev/null
++++ b/ui/xui/host-ui.hh
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <functional>
++#include "xemu-hud.h"
++
++// UI-only scope entered with the main-loop lock held.
++// Do not retain live guest/device pointers.
++class HostUiUnlockedScope {
++public:
++    HostUiUnlockedScope() { xemu_main_loop_unlock(); }
++    ~HostUiUnlockedScope() { xemu_main_loop_lock(); }
++    HostUiUnlockedScope(const HostUiUnlockedScope &) = delete;
++    HostUiUnlockedScope &operator=(const HostUiUnlockedScope &) = delete;
++};
++
++// Host actions run post-present outside emulator locks.
++void QueueHostUiAction(std::function<void()> action);
++void ProcessHostUiActions();
++void OpenHostUrl(const char *url);
+diff --git a/ui/xui/main-menu.cc b/ui/xui/main-menu.cc
+index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243a5746daa 100644
+--- a/ui/xui/main-menu.cc
++++ b/ui/xui/main-menu.cc
+@@ -19,6 +19,7 @@
+ #include "common.hh"
+ #include "scene-manager.hh"
+ #include "widgets.hh"
++#include "host-ui.hh"
+ #include "main-menu.hh"
+ #include "font-manager.hh"
+ #include "input-manager.hh"
+@@ -986,7 +987,7 @@ void MainMenuNetworkView::DrawPcapOptions(bool appearing)
+         ImGui::Dummy(ImVec2(0,10*g_viewport_mgr.m_scale));
+         ImGui::SetCursorPosX((ImGui::GetWindowWidth()-120*g_viewport_mgr.m_scale)/2);
+         if (ImGui::Button("Install npcap", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
+-            SDL_OpenURL("https://nmap.org/npcap/");
++            OpenHostUrl("https://nmap.org/npcap/");
+         }
+ #endif
+     } else {
+@@ -1575,37 +1576,55 @@ void MainMenuSystemView::Draw()
+                });
+ }
+ 
+-MainMenuAboutView::MainMenuAboutView() : m_config_info_text{ NULL }
+-{
+-}
++MainMenuAboutView::MainMenuAboutView() = default;
+ 
+ void MainMenuAboutView::UpdateConfigInfoText()
+ {
+-    if (m_config_info_text) {
+-        g_free(m_config_info_text);
+-    }
+-
+-    gchar *bootrom_checksum =
+-        GetFileMD5Checksum(g_config.sys.files.bootrom_path);
+-    if (!bootrom_checksum) {
+-        bootrom_checksum = g_strdup("None");
+-    }
+-
+-    gchar *flash_rom_checksum =
+-        GetFileMD5Checksum(g_config.sys.files.flashrom_path);
+-    if (!flash_rom_checksum) {
+-        flash_rom_checksum = g_strdup("None");
+-    }
+-
+-    m_config_info_text = g_strdup_printf("MCPX Boot ROM MD5 Hash:        %s\n"
+-                                         "Flash ROM (BIOS) MD5 Hash:     %s",
+-                                         bootrom_checksum, flash_rom_checksum);
+-    g_free(bootrom_checksum);
+-    g_free(flash_rom_checksum);
++    // Defer ROM hashing until About is visible.
++    ++m_config_info_generation;
++    m_config_info_dirty = true;
++    m_config_info_text = "Loading ROM hashes...";
+ }
+ 
+ void MainMenuAboutView::Draw()
+ {
++    // Copy paths before releasing the guest lock.
++    std::string bootrom_path, flashrom_path;
++    if (m_config_info_dirty) {
++        if (g_config.sys.files.bootrom_path) bootrom_path = g_config.sys.files.bootrom_path;
++        if (g_config.sys.files.flashrom_path) flashrom_path = g_config.sys.files.flashrom_path;
++    }
++    HostUiUnlockedScope unlocked;
++    if (m_config_info_job.valid() &&
++        m_config_info_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
++        try {
++            auto result = m_config_info_job.get();
++            if (result.generation == m_config_info_generation) {
++                m_config_info_text = std::move(result.text);
++            }
++        } catch (const std::exception &) {
++            if (!m_config_info_dirty) m_config_info_text = "Unable to read ROM hashes.";
++        }
++    }
++    if (m_config_info_dirty && !m_config_info_job.valid()) {
++        const uint64_t generation = m_config_info_generation;
++        try {
++            m_config_info_job = std::async(std::launch::async,
++                [bootrom_path = std::move(bootrom_path),
++                 flashrom_path = std::move(flashrom_path), generation] {
++                    g_autofree gchar *bootrom = GetFileMD5Checksum(bootrom_path.c_str());
++                    g_autofree gchar *flashrom = GetFileMD5Checksum(flashrom_path.c_str());
++                    g_autofree gchar *text = g_strdup_printf(
++                        "MCPX Boot ROM MD5 Hash:        %s\n"
++                        "Flash ROM (BIOS) MD5 Hash:     %s",
++                        bootrom ? bootrom : "None", flashrom ? flashrom : "None");
++                    return ConfigInfoResult{generation, text};
++                });
++        } catch (const std::exception &) {
++            m_config_info_text = "Unable to start ROM hash check.";
++        }
++        m_config_info_dirty = false;
++    }
+     static const char *build_info_text = NULL;
+     if (build_info_text == NULL) {
+         build_info_text =
+@@ -1630,10 +1649,6 @@ void MainMenuAboutView::Draw()
+             gl_vendor, gl_renderer, gl_version, gl_shader_version);
+     }
+ 
+-    if (m_config_info_text == NULL) {
+-        UpdateConfigInfoText();
+-    }
+-
+     Logo();
+ 
+     SectionTitle("Build Information");
+@@ -1654,8 +1669,8 @@ void MainMenuAboutView::Draw()
+ 
+     SectionTitle("Config Information");
+     ImGui::PushFont(g_font_mgr.m_fixed_width_font);
+-    ImGui::InputTextMultiline("##config_info", (char *)m_config_info_text,
+-                              strlen(m_config_info_text) + 1,
++    ImGui::InputTextMultiline("##config_info", (char *)m_config_info_text.c_str(),
++                              m_config_info_text.size() + 1,
+                               ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 3),
+                               ImGuiInputTextFlags_ReadOnly);
+     ImGui::PopFont();
+@@ -1665,7 +1680,7 @@ void MainMenuAboutView::Draw()
+     ImGui::Text("Visit");
+     ImGui::SameLine();
+     if (ImGui::SmallButton("https://xemu.app")) {
+-        SDL_OpenURL("https://xemu.app");
++        OpenHostUrl("https://xemu.app");
+     }
+     ImGui::SameLine();
+     ImGui::Text("for more information");
+diff --git a/ui/xui/main-menu.hh b/ui/xui/main-menu.hh
+index dccb4da771dbb65a749cbabee722812fb4cb6cd1..bb91d8aab457ee3b1ec1f53d137331ba0f91bd08 100644
+--- a/ui/xui/main-menu.hh
++++ b/ui/xui/main-menu.hh
+@@ -17,6 +17,8 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #pragma once
++#include <future>
++#include <cstdint>
+ #include <string>
+ #include <vector>
+ #include <memory>
+@@ -148,7 +150,14 @@ public:
+ class MainMenuAboutView : public virtual MainMenuTabView
+ {
+ protected:
+-    char *m_config_info_text;
++    struct ConfigInfoResult {
++        uint64_t generation;
++        std::string text;
++    };
++    std::string m_config_info_text = "Loading ROM hashes...";
++    std::future<ConfigInfoResult> m_config_info_job;
++    uint64_t m_config_info_generation = 0;
++    bool m_config_info_dirty = true;
+ public:
+     MainMenuAboutView();
+     void UpdateConfigInfoText();
+diff --git a/ui/xui/main.cc b/ui/xui/main.cc
+--- a/ui/xui/main.cc
++++ b/ui/xui/main.cc
+@@ -51,2 +51,3 @@
+ #include "menubar.hh"
++#include "host-ui.hh"
+ #include "compat.hh"
+@@ -325,2 +326,7 @@
++void xemu_hud_process_host_actions()
++{
++    ProcessHostUiActions();
++}
++
+ void xemu_hud_render()
+ {
+diff --git a/ui/xui/menubar.cc b/ui/xui/menubar.cc
+index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae863b6ae91d 100644
+--- a/ui/xui/menubar.cc
++++ b/ui/xui/menubar.cc
+@@ -20,6 +20,9 @@
+ #include "common.hh"
+ #include "main-menu.hh"
+ #include "menubar.hh"
++#include "host-ui.hh"
++#include <array>
++#include <string>
+ #include "misc.hh"
+ #include "widgets.hh"
+ #include "monitor.hh"
+@@ -92,65 +95,74 @@ void ShowMainMenu()
+     {
+         if (ImGui::BeginMenu("Machine"))
+         {
+-            if (ImGui::MenuItem(running ? "Pause" : "Resume", SHORTCUT_MENU_TEXT(P))) ActionTogglePause();
+-            if (ImGui::MenuItem("Screenshot", "F12")) ActionScreenshot();
+-
+-            if (ImGui::BeginMenu("Snapshot")) {
+-                if (ImGui::MenuItem("Create Snapshot")) {
+-                    xemu_snapshots_save(NULL, NULL);
+-                    xemu_queue_notification("Created new snapshot");
+-                }
+-
+-                for (int i = 0; i < 4; ++i) {
+-                    char *hotkey = g_strdup_printf("Shift+F%d", i + 5);
+-
+-                    char *load_name;
+-                    char *save_name;
+-
+-                    assert(g_snapshot_shortcut_index_key_map[i]);
+-                    bool bound = *(g_snapshot_shortcut_index_key_map[i]) &&
+-                            (**(g_snapshot_shortcut_index_key_map[i]) != 0);
+-
+-                    if (bound) {
+-                        load_name = g_strdup_printf("Load '%s'", *(g_snapshot_shortcut_index_key_map[i]));
+-                        save_name = g_strdup_printf("Save '%s'", *(g_snapshot_shortcut_index_key_map[i]));
+-                    } else {
+-                        load_name = g_strdup_printf("Load F%d (Unbound)", i + 5);
+-                        save_name = g_strdup_printf("Save F%d (Unbound)", i + 5);
+-                    }
+-
+-                    ImGui::Separator();
+-
+-                    if (ImGui::MenuItem(load_name, hotkey + sizeof("Shift+") - 1, false, bound)) {
+-                        ActionActivateBoundSnapshot(i, false);
+-                    }
+-
+-                    if (ImGui::MenuItem(save_name, hotkey, false, bound)) {
+-                        ActionActivateBoundSnapshot(i, true);
++            // Copy snapshot names before unlocking.
++            std::array<std::string, 4> snapshot_names;
++            for (int i = 0; i < 4; ++i) {
++                const char *name = *g_snapshot_shortcut_index_key_map[i];
++                snapshot_names[i] = name ? name : "";
++            }
++            enum class Command {
++                None, Pause, Screenshot, NewSnapshot, LoadSnapshot, SaveSnapshot,
++                Eject, LoadDisc, Settings, Reset, Exit
++            };
++            Command command = Command::None;
++            int snapshot_slot = 0;
++            {
++                HostUiUnlockedScope unlocked;
++                if (ImGui::MenuItem(running ? "Pause" : "Resume", SHORTCUT_MENU_TEXT(P))) command = Command::Pause;
++                if (ImGui::MenuItem("Screenshot", "F12")) command = Command::Screenshot;
++
++                if (ImGui::BeginMenu("Snapshot")) {
++                    if (ImGui::MenuItem("Create Snapshot")) command = Command::NewSnapshot;
++                    for (int i = 0; i < 4; ++i) {
++                        const bool bound = !snapshot_names[i].empty();
++                        char hotkey[16];
++                        snprintf(hotkey, sizeof(hotkey), "Shift+F%d", i + 5);
++                        const std::string suffix = bound ? "'" + snapshot_names[i] + "'" :
++                            "F" + std::to_string(i + 5) + " (Unbound)";
++                        const std::string load_name = "Load " + suffix;
++                        const std::string save_name = "Save " + suffix;
++                        ImGui::Separator();
++                        if (ImGui::MenuItem(load_name.c_str(), hotkey + sizeof("Shift+") - 1, false, bound)) {
++                            command = Command::LoadSnapshot;
++                            snapshot_slot = i;
++                        }
++                        if (ImGui::MenuItem(save_name.c_str(), hotkey, false, bound)) {
++                            command = Command::SaveSnapshot;
++                            snapshot_slot = i;
++                        }
+                     }
+-
+-                    g_free(hotkey);
+-                    g_free(load_name);
+-                    g_free(save_name);
++                    ImGui::EndMenu();
+                 }
+ 
++                ImGui::Separator();
++                if (ImGui::MenuItem("Eject Disc", SHORTCUT_MENU_TEXT(E))) command = Command::Eject;
++                if (ImGui::MenuItem("Load Disc...", SHORTCUT_MENU_TEXT(O))) command = Command::LoadDisc;
++                ImGui::Separator();
++                if (ImGui::MenuItem("Settings...")) command = Command::Settings;
++                ImGui::Separator();
++                if (ImGui::MenuItem("Reset", SHORTCUT_MENU_TEXT(R))) command = Command::Reset;
++                if (ImGui::MenuItem("Exit", SHORTCUT_MENU_TEXT(Q))) command = Command::Exit;
+                 ImGui::EndMenu();
+             }
+-
+-            ImGui::Separator();
+-
+-            if (ImGui::MenuItem("Eject Disc", SHORTCUT_MENU_TEXT(E))) ActionEjectDisc();
+-            if (ImGui::MenuItem("Load Disc...", SHORTCUT_MENU_TEXT(O))) ActionLoadDisc();
+-
+-            ImGui::Separator();
+-
+-            if (ImGui::MenuItem("Settings...")) g_main_menu.ShowSettings();
+-
+-            ImGui::Separator();
+-
+-            if (ImGui::MenuItem("Reset", SHORTCUT_MENU_TEXT(R))) ActionReset();
+-            if (ImGui::MenuItem("Exit", SHORTCUT_MENU_TEXT(Q))) ActionShutdown();
+-            ImGui::EndMenu();
++            // Guest commands keep the original synchronized behavior. Opening
++            // a menu is not a command and must not stop the machine.
++            switch (command) {
++            case Command::Pause: ActionTogglePause(); break;
++            case Command::Screenshot: ActionScreenshot(); break;
++            case Command::NewSnapshot:
++                xemu_snapshots_save(NULL, NULL);
++                xemu_queue_notification("Created new snapshot");
++                break;
++            case Command::LoadSnapshot: ActionActivateBoundSnapshot(snapshot_slot, false); break;
++            case Command::SaveSnapshot: ActionActivateBoundSnapshot(snapshot_slot, true); break;
++            case Command::Eject: ActionEjectDisc(); break;
++            case Command::LoadDisc: ActionLoadDisc(); break;
++            case Command::Settings: g_main_menu.ShowSettings(); break;
++            case Command::Reset: ActionReset(); break;
++            case Command::Exit: ActionShutdown(); break;
++            case Command::None: break;
++            }
+         }
+ 
+         if (ImGui::BeginMenu("View"))
+@@ -230,19 +242,22 @@ void ShowMainMenu()
+ 
+         if (ImGui::BeginMenu("Help"))
+         {
+-            if (ImGui::MenuItem("Help", NULL)) {
+-                SDL_OpenURL("https://xemu.app/docs/getting-started/");
+-            }
+-
+-            ImGui::MenuItem("Report Compatibility...", NULL,
+-                            &compatibility_reporter_window.is_open);
++            bool show_about;
++            {
++                HostUiUnlockedScope unlocked;
++                if (ImGui::MenuItem("Help", NULL)) {
++                    OpenHostUrl("https://xemu.app/docs/getting-started/");
++                }
++                ImGui::MenuItem("Report Compatibility...", NULL,
++                                &compatibility_reporter_window.is_open);
+ #if defined(_WIN32)
+-            ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
++                ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
+ #endif
+-
+-            ImGui::Separator();
+-            if (ImGui::MenuItem("About")) g_main_menu.ShowAbout();
+-            ImGui::EndMenu();
++                ImGui::Separator();
++                show_about = ImGui::MenuItem("About");
++                ImGui::EndMenu();
++            }
++            if (show_about) g_main_menu.ShowAbout();
+         }
+ 
+         g_main_menu_height = ImGui::GetWindowHeight();
+diff --git a/ui/xui/meson.build b/ui/xui/meson.build
+index 95d50cb303b394edc04ef00adb2ea976ddf54a40..34351a3f75a599b78cae66a98e51761bde9bd0d4 100644
+--- a/ui/xui/meson.build
++++ b/ui/xui/meson.build
+@@ -5,6 +5,7 @@ xemu_ss.add(files(
+   'debug.cc',
+   'font-manager.cc',
+   'gl-helpers.cc',
++  'host-ui.cc',
+   'input-manager.cc',
+   'main-menu.cc',
+   'main.cc',
+diff --git a/ui/xui/misc.cc b/ui/xui/misc.cc
+index 8bc1d2ce8f993711350aebf050a8b6e7e845df75..95ce6e06c5a32dd2265978cb78b5a7229ad9c5e4 100644
+--- a/ui/xui/misc.cc
++++ b/ui/xui/misc.cc
+@@ -17,6 +17,8 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include "misc.hh"
++#include "host-ui.hh"
++#include <vector>
+ #include <SDL3/SDL_init.h>
+ #include <SDL3/SDL_filesystem.h>
+ #include <SDL3/SDL_platform_defines.h>
+@@ -39,14 +41,34 @@ static void RunOnMainThread(std::function<void()> &&func)
+     }
+ }
+ 
++struct FileDialogRequest {
++    FileDialogCallback callback;
++    std::string default_location;
++    std::vector<std::string> names, patterns;
++    std::vector<SDL_DialogFileFilter> filters;
++
++    FileDialogRequest(const SDL_DialogFileFilter *input, int count,
++                      const char *location, FileDialogCallback cb)
++        : callback(std::move(cb)), default_location(location ? location : "")
++    {
++        for (int i = 0; i < count; ++i) {
++            names.emplace_back(input[i].name);
++            patterns.emplace_back(input[i].pattern);
++        }
++        for (int i = 0; i < count; ++i) {
++            filters.push_back({names[i].c_str(), patterns[i].c_str()});
++        }
++    }
++};
++
+ static void FileDialogCallbackWrapper(void *userdata,
+                                       const char *const *filelist, int filter)
+ {
+-    std::unique_ptr<FileDialogCallback> callback(
+-        static_cast<FileDialogCallback *>(userdata));
++    std::unique_ptr<FileDialogRequest> request(
++        static_cast<FileDialogRequest *>(userdata));
+     if (filelist && filelist[0]) {
+         std::string path = filelist[0];
+-        RunOnMainThread([callback = std::move(*callback),
++        RunOnMainThread([callback = std::move(request->callback),
+                          path = std::move(path)]() { callback(path.c_str()); });
+     }
+ }
+@@ -85,27 +107,40 @@ void ShowOpenFileDialog(const SDL_DialogFileFilter *filters, int nfilters,
+                         const char *default_location,
+                         FileDialogCallback callback)
+ {
+-    auto *cb = new FileDialogCallback(std::move(callback));
+-    std::string normalized = NormalizeDefaultLocation(default_location);
+-    SDL_ShowOpenFileDialog(FileDialogCallbackWrapper, cb, xemu_get_window(),
+-                           filters, nfilters,
+-                           normalized.empty() ? nullptr : normalized.c_str(),
+-                           false);
++    // Keep the queued request copyable until SDL takes ownership.
++    auto request = std::make_shared<std::unique_ptr<FileDialogRequest>>(
++        std::make_unique<FileDialogRequest>(filters, nfilters, default_location, std::move(callback)));
++    QueueHostUiAction([request] {
++        (*request)->default_location = NormalizeDefaultLocation((*request)->default_location.c_str());
++        auto *r = request->release();
++        SDL_ShowOpenFileDialog(FileDialogCallbackWrapper, r, xemu_get_window(),
++            r->filters.empty() ? nullptr : r->filters.data(), r->filters.size(),
++            r->default_location.empty() ? nullptr : r->default_location.c_str(), false);
++    });
+ }
+ 
+ void ShowSaveFileDialog(const SDL_DialogFileFilter *filters, int nfilters,
+                         const char *default_location,
+                         FileDialogCallback callback)
+ {
+-    auto *cb = new FileDialogCallback(std::move(callback));
+-    SDL_ShowSaveFileDialog(FileDialogCallbackWrapper, cb, xemu_get_window(),
+-                           filters, nfilters, default_location);
++    auto request = std::make_shared<std::unique_ptr<FileDialogRequest>>(
++        std::make_unique<FileDialogRequest>(filters, nfilters, default_location, std::move(callback)));
++    QueueHostUiAction([request] {
++        auto *r = request->release();
++        SDL_ShowSaveFileDialog(FileDialogCallbackWrapper, r, xemu_get_window(),
++            r->filters.empty() ? nullptr : r->filters.data(), r->filters.size(),
++            r->default_location.empty() ? nullptr : r->default_location.c_str());
++    });
+ }
+ 
+ void ShowOpenFolderDialog(const char *default_location,
+                           FileDialogCallback callback)
+ {
+-    auto *cb = new FileDialogCallback(std::move(callback));
+-    SDL_ShowOpenFolderDialog(FileDialogCallbackWrapper, cb,
+-                             xemu_get_window(), default_location, false);
++    auto request = std::make_shared<std::unique_ptr<FileDialogRequest>>(
++        std::make_unique<FileDialogRequest>(nullptr, 0, default_location, std::move(callback)));
++    QueueHostUiAction([request] {
++        auto *r = request->release();
++        SDL_ShowOpenFolderDialog(FileDialogCallbackWrapper, r, xemu_get_window(),
++            r->default_location.empty() ? nullptr : r->default_location.c_str(), false);
++    });
+ }
+diff --git a/ui/xui/misc.hh b/ui/xui/misc.hh
+index 01ceba678ba42451e5fe23633224992812b34e94..3ef6dc1b13ef5789a970a69c174f73ebf3331841 100644
+--- a/ui/xui/misc.hh
++++ b/ui/xui/misc.hh
+@@ -98,20 +98,18 @@ int PushWindowTransparencySettings(bool transparent, float alpha_transparent = 0
+ 
+ static inline gchar *GetFileMD5Checksum(const char *path)
+ {
+-    auto *checksum = g_checksum_new(G_CHECKSUM_MD5);
+-
++    if (!path || !*path) return nullptr;
+     auto *file = qemu_fopen(path, "rb");
+     if (!file) return nullptr;
+ 
+-    guchar buf[512];
++    auto *checksum = g_checksum_new(G_CHECKSUM_MD5);
++    guchar buf[16 * 1024];
+     size_t nread;
+     while ((nread = fread(buf, 1, sizeof(buf), file))) {
+         g_checksum_update(checksum, buf, nread);
+     }
+-
+-    gchar *checksum_str = g_strdup(g_checksum_get_string(checksum));
++    gchar *checksum_str = ferror(file) ? nullptr : g_strdup(g_checksum_get_string(checksum));
+     fclose(file);
+     g_checksum_free(checksum);
+     return checksum_str;
+ }
+-
+diff --git a/ui/xui/reporting.cc b/ui/xui/reporting.cc
+index 52a18409f40d9f0b39995c0699a5db96a3954043..a2d0e6a77a6b7b936ede3cc63dd59989d2715335 100644
+--- a/ui/xui/reporting.cc
++++ b/ui/xui/reporting.cc
+@@ -31,7 +31,7 @@ using json = nlohmann::json;
+ 
+ static const char *compat_report_endpoint_url = "https://reports.xemu.app/compatibility";
+ 
+-CompatibilityReport::CompatibilityReport()
++CompatibilityReport::CompatibilityReport() : result_code(0)
+ {
+ }
+ 
+@@ -67,6 +67,7 @@ bool CompatibilityReport::Send()
+ 	const std::string &s = GetSerializedReport();
+ 
+ 	int res = http_post_json(compat_report_endpoint_url, s.c_str(), NULL);
++	result_code = res;
+ 	if (res < 0) {
+ 		result_code = -1;
+ 		result_msg = "Failed to connect";
+diff --git a/ui/xui/update.cc b/ui/xui/update.cc
+index 272476e493e596645092e159073085d6c5c2948e..a7cb13739568d2cad506119b43bdbd1415eba9cb 100644
+--- a/ui/xui/update.cc
++++ b/ui/xui/update.cc
+@@ -17,6 +17,7 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include "common.hh"
++#include "host-ui.hh"
+ #include "qemu/http.h"
+ #include "update.hh"
+ #include "viewport-manager.hh"
+@@ -96,7 +97,7 @@ void AutoUpdateWindow::Draw()
+         ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+ 
+         if (ImGui::SmallButton("Release notes...")) {
+-            SDL_OpenURL(updater.get_release_url().c_str());
++            OpenHostUrl(updater.get_release_url().c_str());
+         }
+     }
+ 
+diff --git a/ui/xui/widgets.cc b/ui/xui/widgets.cc
+index f1e31c4ab10ffb3629d0e3d47d3e10c234a42761..66f46263012fc2723178af8cc3c10de28d347575 100644
+--- a/ui/xui/widgets.cc
++++ b/ui/xui/widgets.cc
+@@ -17,6 +17,7 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include "widgets.hh"
++#include "host-ui.hh"
+ #include "misc.hh"
+ #include "font-manager.hh"
+ #include "viewport-manager.hh"
+@@ -507,7 +508,7 @@ void Hyperlink(const char *text, const char *url)
+     ImGui::GetWindowDrawList()->AddLine(min, max, col, 1.0 * g_viewport_mgr.m_scale);
+ 
+     if (ImGui::IsItemClicked()) {
+-        SDL_OpenURL(url);
++        OpenHostUrl(url);
+     }
+ }
+ 
+diff --git a/ui/xui/xemu-hud.h b/ui/xui/xemu-hud.h
+--- a/ui/xui/xemu-hud.h
++++ b/ui/xui/xemu-hud.h
+@@ -48,2 +48,3 @@
+ void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse);
++void xemu_hud_process_host_actions(void);
+ void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip);

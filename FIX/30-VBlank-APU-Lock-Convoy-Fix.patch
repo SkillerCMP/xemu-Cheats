@@ -36,12 +36,12 @@ index c57ecb634febfdf1b9f6434e98f010b6d35428e1..c32b6acd6fa7c3f1924fdfaf56df01c7
          hrtf_filter_init(&d->vp.filters[v].hrtf);
      }
 diff --git a/ui/xemu.c b/ui/xemu.c
-index 4a2f0bac5792c185ba948174f1d7639cf3f9a965..a314024362e4505e2c5e435dba6d2fa0eaae3770 100644
+index 46ff05d604f0234504ea30557d1840487c478ecb..76742b5d9afe343447b0fa71ff9bd96fbc316356 100644
 --- a/ui/xemu.c
 +++ b/ui/xemu.c
-@@ -767,9 +767,9 @@ static void *vblank_timer_thread(void *opaque)
-         }
- 
+@@ -810,9 +810,9 @@ static void *vblank_timer_thread(void *opaque)
+         xemu_debug_tools_bql_trace_set_next_context(
+             XEMU_DEBUG_TOOLS_BQL_CONTEXT_UI_VBLANK);
          if (!qatomic_read(&qemu_exiting)) {
 -            xemu_main_loop_lock();
 +            bql_lock();
