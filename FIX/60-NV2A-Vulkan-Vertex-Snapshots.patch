@@ -1,14 +1,9 @@
-From: XEMU local matrix builder
-Subject: [PATCH 60] NV2A Vulkan: bounded immutable vertex snapshots
-
-Core renderer experiment, independent of Debug Tools. Preserve guest vertex
-indices and existing finish/fence fallback; stage per-draw immutable bytes in
-the existing inline arena. XEMU_VK_VERTEX_SNAPSHOTS=0 selects the stock path.
-
 diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
 --- a/hw/xbox/nv2a/pgraph/vk/draw.c
 +++ b/hw/xbox/nv2a/pgraph/vk/draw.c
-@@ -1723,2 +1723,13 @@
+@@ -1561,6 +1561,17 @@
+     NV2AState *d = container_of(pg, NV2AState, pgraph);
+     PGRAPHVkState *r = pg->vk_renderer_state;
  
 +    /* Fix 60 plans before pipeline preparation, copies after every helper
 +     * which can finish, and never overwrites BUFFER_VERTEX_RAM on this path. */
@@ -22,7 +17,11 @@ diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
 +    }
 +
      if (r->num_vertex_ram_buffer_syncs == 0) {
-@@ -2101,2 +2112,7 @@
+         return;
+     }
+@@ -1913,6 +1924,11 @@
+ 
+     VertexBufferRemap remap = {0};
  
 +    if (r->vertex_snapshot.active) {
 +        remap.attributes = UINT16_MAX;
@@ -30,18 +29,26 @@ diff --git a/hw/xbox/nv2a/pgraph/vk/draw.c b/hw/xbox/nv2a/pgraph/vk/draw.c
 +    }
 +
      VkDeviceAddress output_offset = 0;
-@@ -2168,2 +2184,7 @@
  
+     for (int attr_id = 0; attr_id < NV2A_VERTEXSHADER_ATTRIBUTES; attr_id++) {
+@@ -1979,6 +1995,11 @@
+     NV2AState *d = container_of(pg, NV2AState, pgraph);
+     PGRAPHVkState *r = pg->vk_renderer_state;
+     StorageBuffer *buffer = &r->storage_buffers[BUFFER_VERTEX_INLINE_STAGING];
++
 +    if (r->vertex_snapshot.active) {
 +        pgraph_vk_copy_vertex_snapshot(d);
 +        return;
 +    }
-+
+ 
      if (!remap.attributes) {
+         return;
 diff --git a/hw/xbox/nv2a/pgraph/vk/vertex.c b/hw/xbox/nv2a/pgraph/vk/vertex.c
 --- a/hw/xbox/nv2a/pgraph/vk/vertex.c
 +++ b/hw/xbox/nv2a/pgraph/vk/vertex.c
-@@ -350 +350,237 @@
+@@ -315,3 +315,239 @@
+         }
+     }
  }
 +
 +/* Fix 60: immutable per-draw RAM vertices in the existing inline arena.
@@ -608,7 +615,7 @@ new file mode 100644
 +#!/usr/bin/env python3
 +"""Compile actual Fix60 planner and renderer helpers against delayed-GPU fixtures.
 +This does not run a Vulkan driver or the game. Standard C and stub Vulkan types
-+are used. Observation-only calls are removed; separate frozen guards cover them.
++are used. Helpers are compiled directly from the fix-only production source.
 +"""
 +import argparse
 +import pathlib
@@ -657,7 +664,7 @@ new file mode 100644
 +                'static void bind_vertex_buffer(']:
 +        result+='\n'+block(d,sig)
 +    result+='\n#pragma GCC diagnostic pop\n'
-+    return re.sub(r'xemu_debug_tools_pgraph_draw_trace_(?:stage_begin|stage_end|metric)\s*\([^;]*\);','',result)
++    return result
 +
 +def run(cmd):
 +    print('+',' '.join(map(str,cmd)),flush=True)
@@ -666,7 +673,7 @@ new file mode 100644
 +def main():
 +    ap=argparse.ArgumentParser();ap.add_argument('--root',default='.');ap.add_argument('--compiler',default='cc');ap.add_argument('--sanitize',action='store_true');ap.add_argument('--ndebug',action='store_true');ap.add_argument('--negative',action='store_true');a=ap.parse_args()
 +    root=pathlib.Path(a.root).resolve();td=root/'tests/unit'
-+    # Fixtures are adjacent to this script, independent of the optional Debug Tools.
++    # Fixtures are adjacent to this script.
 +    fixture=(td/'nv2a-vk-vertex-snapshot-fixture.h').read_text()
 +    test=(td/'nv2a-vk-vertex-snapshot-fixture.c').read_text()
 +    code=helpers(root)

@@ -1,9 +1,8 @@
 diff --git a/tests/unit/xemu-stock-ui-golden.py b/tests/unit/xemu-stock-ui-golden.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..97b7fe4011f2d24ae4bb27673b066d5d907a1bf0
 --- /dev/null
 +++ b/tests/unit/xemu-stock-ui-golden.py
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,75 @@
 +#!/usr/bin/env python3
 +"""Stock Machine/Help lock-boundary tests; no emulator, graphics driver or network.
 +Compiles the packaged production bodies, replacing only their SDK/header boundary.
@@ -81,7 +80,6 @@ index 0000000000000000000000000000000000000000..97b7fe4011f2d24ae4bb27673b066d5d
 +print('PASS: stock Machine/Help source guards and exact-body native harness')
 diff --git a/tests/unit/xemu-stock-ui-test-cases.hh b/tests/unit/xemu-stock-ui-test-cases.hh
 new file mode 100644
-index 0000000000000000000000000000000000000000..bf6c2fe95f86f883be9505feecda475d50d05326
 --- /dev/null
 +++ b/tests/unit/xemu-stock-ui-test-cases.hh
 @@ -0,0 +1,141 @@
@@ -228,10 +226,9 @@ index 0000000000000000000000000000000000000000..bf6c2fe95f86f883be9505feecda475d
 +}
 diff --git a/tests/unit/xemu-stock-ui-test-support.hh b/tests/unit/xemu-stock-ui-test-support.hh
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b03e87454c0acc463b11a455ee266fc90950c85
 --- /dev/null
 +++ b/tests/unit/xemu-stock-ui-test-support.hh
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,207 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// SDK boundary stubs only; tested production function bodies are inserted verbatim.
 +#include <algorithm>
@@ -431,7 +428,6 @@ index 0000000000000000000000000000000000000000..4b03e87454c0acc463b11a455ee266fc
 +void nv2a_set_surface_scale_factor(int){need_lock();}
 +int xemu_is_fullscreen(){return false;}
 +void xemu_toggle_fullscreen(){need_lock();}
-+void debug_tools_draw_menu_items(){need_lock();}
 +static std::function<void()> http_probe;
 +static std::atomic<int> http_status{200},send_count{0};
 +static std::string sent_payload;
@@ -451,7 +447,6 @@ diff --git a/ui/xemu.c b/ui/xemu.c
  
  static void display_very_early_init(DisplayOptions *o)
 diff --git a/ui/xui/compat.cc b/ui/xui/compat.cc
-index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c292a767fda 100644
 --- a/ui/xui/compat.cc
 +++ b/ui/xui/compat.cc
 @@ -17,9 +17,11 @@
@@ -466,7 +461,7 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
  #include "viewport-manager.hh"
  #include "font-manager.hh"
  #include "xemu-version.h"
-@@ -73,147 +75,164 @@ void CompatibilityReporter::Draw()
+@@ -73,147 +75,164 @@
          return;
      }
  
@@ -485,8 +480,7 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 +        is_xbe_identified = xbe && xbe->headers && xbe->headers_len > 0;
          if (is_xbe_identified) {
 -            report.SetXbeData(xbe);
-+            xbe_headers.assign(xbe->headers, xbe->headers + xbe->headers_len);
-         }
+-        }
 -        did_send = send_result = false;
 -
 -        playability = 3; // Playable
@@ -498,8 +492,12 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 -        report.token = token_buf;
 -
 -        dirty = true;
++            xbe_headers.assign(xbe->headers, xbe->headers + xbe->headers_len);
++        }
 +        if (g_config.general.user_token) saved_token = g_config.general.user_token;
      }
+-
+-    if (!is_xbe_identified) {
 +    bool token_changed = false;
 +    {
 +        HostUiUnlockedScope unlocked;
@@ -525,14 +523,7 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 +
 +            dirty = true;
 +        }
- 
--    if (!is_xbe_identified) {
--        ImGui::TextWrapped(
--            "An XBE could not be identified. Please launch an official "
--            "Xbox title to submit a compatibility report.");
--        ImGui::End();
--        return;
--    }
++
 +        if (!is_xbe_identified) {
 +            ImGui::TextWrapped(
 +                "An XBE could not be identified. Please launch an official "
@@ -540,7 +531,121 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 +            ImGui::End();
 +            return;
 +        }
- 
++
+         ImGui::TextWrapped(
+-            "An XBE could not be identified. Please launch an official "
+-            "Xbox title to submit a compatibility report.");
++            "If you would like to help improve xemu by submitting a compatibility report for this "
++            "title, please select an appropriate playability level, enter a "
++            "brief description, then click 'Send'."
++            "\n\n"
++            "Note: By submitting a report, you acknowledge and consent to "
++            "collection, archival, and publication of information as outlined "
++            "in 'Privacy Disclosure' below.");
++
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++        ImGui::Separator();
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++
++        ImGui::Columns(2, "", false);
++        ImGui::SetColumnWidth(0, ImGui::GetWindowWidth()*0.25);
++
++        ImGui::Text("User Token");
++        ImGui::SameLine();
++        HelpMarker("This is a unique access token used to authorize submission of the report. To request a token, click 'Get Token'.");
++        ImGui::NextColumn();
++        float item_width = ImGui::GetColumnWidth()*0.75-20*g_viewport_mgr.m_scale;
++        ImGui::SetNextItemWidth(item_width);
++        ImGui::PushFont(g_font_mgr.m_fixed_width_font);
++        if (ImGui::InputText("###UserToken", token_buf, sizeof(token_buf), 0)) {
++            token_changed = true;
++            report.token = token_buf;
++            dirty = true;
++        }
++        ImGui::PopFont();
++        ImGui::SameLine();
++        if (ImGui::Button("Get Token")) {
++            OpenHostUrl("https://reports.xemu.app");
++        }
++        ImGui::NextColumn();
++
++        ImGui::Text("Playability");
++        ImGui::NextColumn();
++        ImGui::SetNextItemWidth(item_width);
++        if (ImGui::Combo("###PlayabilityRating", &playability,
++            "Broken\0" "Intro/Menus\0" "Starts\0" "Playable\0" "Perfect\0")) {
++            report.compat_rating = playability_names[playability];
++            dirty = true;
++        }
++        ImGui::SameLine();
++        HelpMarker(playability_descriptions[playability]);
++        ImGui::NextColumn();
++
++        ImGui::Columns(1);
++
++        ImGui::Text("Description");
++        if (ImGui::InputTextMultiline("###desc", description, sizeof(description), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 6), 0)) {
++            report.compat_comments = description;
++            dirty = true;
++        }
++
++        if (ImGui::TreeNode("Report Details")) {
++            ImGui::PushFont(g_font_mgr.m_fixed_width_font);
++            if (dirty) {
++                serialized_report = report.GetSerializedReport();
++                dirty = false;
++            }
++            ImGui::InputTextMultiline("##build_info", (char*)serialized_report.c_str(), strlen(serialized_report.c_str())+1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 7), ImGuiInputTextFlags_ReadOnly);
++            ImGui::PopFont();
++            ImGui::TreePop();
++        }
++
++        if (ImGui::TreeNode("Privacy Disclosure (Please read before submission!)")) {
++            ImGui::TextWrapped(
++                "By volunteering to submit a compatibility report, basic information about your "
++                "computer is collected, including: your operating system version, CPU model, "
++                "graphics card/driver information, and details about the title which are "
++                "extracted from the executable in memory. The contents of this report can be "
++                "seen before submission by expanding 'Report Details'."
++                "\n\n"
++                "Like many websites, upon submission, the public IP address of your computer is "
++                "also recorded with your report. If provided, the identity associated with your "
++                "token is also recorded."
++                "\n\n"
++                "This information will be archived and used to analyze, resolve problems with, "
++                "and improve the application. This information may be made publicly visible, "
++                "for example: to anyone who wishes to see the playability status of a title, as "
++                "indicated by your report.");
++            ImGui::TreePop();
++        }
++
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++        ImGui::Separator();
++        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
++
++        if (did_send) {
++            if (send_result) {
++                ImGui::Text("Sent! Thanks.");
++            } else {
++                ImGui::Text("Error: %s (%d)", report.GetResultMessage().c_str(), report.GetResultCode());
++            }
++            ImGui::SameLine();
++        }
++
++        ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+10)*g_viewport_mgr.m_scale);
++
++        ImGui::SetItemDefaultFocus();
++        if (ImGui::Button("Send", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
++            // Keep HTTP host-only; do not pin the guest behind BQL.
++            did_send = true;
++            send_result = report.Send();
++            if (send_result) is_open = false;
++        }
++
+         ImGui::End();
+-        return;
+     }
+-
 -    ImGui::TextWrapped(
 -        "If you would like to help improve xemu by submitting a compatibility report for this "
 -        "title, please select an appropriate playability level, enter a "
@@ -587,66 +692,26 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 -    ImGui::SameLine();
 -    HelpMarker(playability_descriptions[playability]);
 -    ImGui::NextColumn();
-+        ImGui::TextWrapped(
-+            "If you would like to help improve xemu by submitting a compatibility report for this "
-+            "title, please select an appropriate playability level, enter a "
-+            "brief description, then click 'Send'."
-+            "\n\n"
-+            "Note: By submitting a report, you acknowledge and consent to "
-+            "collection, archival, and publication of information as outlined "
-+            "in 'Privacy Disclosure' below.");
- 
+-
 -    ImGui::Columns(1);
-+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
-+        ImGui::Separator();
-+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
- 
+-
 -    ImGui::Text("Description");
 -    if (ImGui::InputTextMultiline("###desc", description, sizeof(description), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 6), 0)) {
 -        report.compat_comments = description;
 -        dirty = true;
 -    }
-+        ImGui::Columns(2, "", false);
-+        ImGui::SetColumnWidth(0, ImGui::GetWindowWidth()*0.25);
- 
+-
 -    if (ImGui::TreeNode("Report Details")) {
-+        ImGui::Text("User Token");
-+        ImGui::SameLine();
-+        HelpMarker("This is a unique access token used to authorize submission of the report. To request a token, click 'Get Token'.");
-+        ImGui::NextColumn();
-+        float item_width = ImGui::GetColumnWidth()*0.75-20*g_viewport_mgr.m_scale;
-+        ImGui::SetNextItemWidth(item_width);
-         ImGui::PushFont(g_font_mgr.m_fixed_width_font);
+-        ImGui::PushFont(g_font_mgr.m_fixed_width_font);
 -        if (dirty) {
 -            serialized_report = report.GetSerializedReport();
 -            dirty = false;
-+        if (ImGui::InputText("###UserToken", token_buf, sizeof(token_buf), 0)) {
-+            token_changed = true;
-+            report.token = token_buf;
-+            dirty = true;
-         }
+-        }
 -        ImGui::InputTextMultiline("##build_info", (char*)serialized_report.c_str(), strlen(serialized_report.c_str())+1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 7), ImGuiInputTextFlags_ReadOnly);
-         ImGui::PopFont();
+-        ImGui::PopFont();
 -        ImGui::TreePop();
 -    }
-+        ImGui::SameLine();
-+        if (ImGui::Button("Get Token")) {
-+            OpenHostUrl("https://reports.xemu.app");
-+        }
-+        ImGui::NextColumn();
-+
-+        ImGui::Text("Playability");
-+        ImGui::NextColumn();
-+        ImGui::SetNextItemWidth(item_width);
-+        if (ImGui::Combo("###PlayabilityRating", &playability,
-+            "Broken\0" "Intro/Menus\0" "Starts\0" "Playable\0" "Perfect\0")) {
-+            report.compat_rating = playability_names[playability];
-+            dirty = true;
-+        }
-+        ImGui::SameLine();
-+        HelpMarker(playability_descriptions[playability]);
-+        ImGui::NextColumn();
- 
+-
 -    if (ImGui::TreeNode("Privacy Disclosure (Please read before submission!)")) {
 -        ImGui::TextWrapped(
 -            "By volunteering to submit a compatibility report, basic information about your "
@@ -665,88 +730,32 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
 -            "indicated by your report.");
 -        ImGui::TreePop();
 -    }
-+        ImGui::Columns(1);
- 
+-
 -    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
 -    ImGui::Separator();
 -    ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
-+        ImGui::Text("Description");
-+        if (ImGui::InputTextMultiline("###desc", description, sizeof(description), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 6), 0)) {
-+            report.compat_comments = description;
-+            dirty = true;
-+        }
- 
+-
 -    if (did_send) {
 -        if (send_result) {
 -            ImGui::Text("Sent! Thanks.");
 -        } else {
 -            ImGui::Text("Error: %s (%d)", report.GetResultMessage().c_str(), report.GetResultCode());
-+        if (ImGui::TreeNode("Report Details")) {
-+            ImGui::PushFont(g_font_mgr.m_fixed_width_font);
-+            if (dirty) {
-+                serialized_report = report.GetSerializedReport();
-+                dirty = false;
-+            }
-+            ImGui::InputTextMultiline("##build_info", (char*)serialized_report.c_str(), strlen(serialized_report.c_str())+1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 7), ImGuiInputTextFlags_ReadOnly);
-+            ImGui::PopFont();
-+            ImGui::TreePop();
-         }
+-        }
 -        ImGui::SameLine();
 -    }
- 
+-
 -    ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+10)*g_viewport_mgr.m_scale);
-+        if (ImGui::TreeNode("Privacy Disclosure (Please read before submission!)")) {
-+            ImGui::TextWrapped(
-+                "By volunteering to submit a compatibility report, basic information about your "
-+                "computer is collected, including: your operating system version, CPU model, "
-+                "graphics card/driver information, and details about the title which are "
-+                "extracted from the executable in memory. The contents of this report can be "
-+                "seen before submission by expanding 'Report Details'."
-+                "\n\n"
-+                "Like many websites, upon submission, the public IP address of your computer is "
-+                "also recorded with your report. If provided, the identity associated with your "
-+                "token is also recorded."
-+                "\n\n"
-+                "This information will be archived and used to analyze, resolve problems with, "
-+                "and improve the application. This information may be made publicly visible, "
-+                "for example: to anyone who wishes to see the playability status of a title, as "
-+                "indicated by your report.");
-+            ImGui::TreePop();
-+        }
- 
+-
 -    ImGui::SetItemDefaultFocus();
 -    if (ImGui::Button("Send", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
 -        did_send = true;
 -        send_result = report.Send();
 -        if (send_result) {
 -            is_open = false;
-+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
-+        ImGui::Separator();
-+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().WindowPadding.y));
-+
-+        if (did_send) {
-+            if (send_result) {
-+                ImGui::Text("Sent! Thanks.");
-+            } else {
-+                ImGui::Text("Error: %s (%d)", report.GetResultMessage().c_str(), report.GetResultCode());
-+            }
-+            ImGui::SameLine();
-         }
+-        }
 -    }
- 
+-
 -    ImGui::End();
-+        ImGui::SetCursorPosX(ImGui::GetWindowWidth()-(120+10)*g_viewport_mgr.m_scale);
-+
-+        ImGui::SetItemDefaultFocus();
-+        if (ImGui::Button("Send", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
-+            // Keep HTTP host-only; do not pin the guest behind BQL.
-+            did_send = true;
-+            send_result = report.Send();
-+            if (send_result) is_open = false;
-+        }
-+
-+        ImGui::End();
-+    }
 +    // Commit settings after the host-only scope.
 +    if (token_changed) xemu_settings_set_string(&g_config.general.user_token, token_buf);
  }
@@ -754,7 +763,6 @@ index c16d4a27768f834cd7ff388983b2ba0dc3804c20..210fc3402bf4ec2f08212f944b6a1c29
  CompatibilityReporter compatibility_reporter_window;
 diff --git a/ui/xui/host-ui.cc b/ui/xui/host-ui.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..7daf50c89a42e1dd636923cbe4412c8316d4f4d0
 --- /dev/null
 +++ b/ui/xui/host-ui.cc
 @@ -0,0 +1,32 @@
@@ -792,7 +800,6 @@ index 0000000000000000000000000000000000000000..7daf50c89a42e1dd636923cbe4412c83
 +}
 diff --git a/ui/xui/host-ui.hh b/ui/xui/host-ui.hh
 new file mode 100644
-index 0000000000000000000000000000000000000000..6b51eebccc1b4ae0b708cd9be7f6d74b999c1535
 --- /dev/null
 +++ b/ui/xui/host-ui.hh
 @@ -0,0 +1,20 @@
@@ -817,7 +824,6 @@ index 0000000000000000000000000000000000000000..6b51eebccc1b4ae0b708cd9be7f6d74b
 +void ProcessHostUiActions();
 +void OpenHostUrl(const char *url);
 diff --git a/ui/xui/main-menu.cc b/ui/xui/main-menu.cc
-index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243a5746daa 100644
 --- a/ui/xui/main-menu.cc
 +++ b/ui/xui/main-menu.cc
 @@ -19,6 +19,7 @@
@@ -828,7 +834,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
  #include "main-menu.hh"
  #include "font-manager.hh"
  #include "input-manager.hh"
-@@ -986,7 +987,7 @@ void MainMenuNetworkView::DrawPcapOptions(bool appearing)
+@@ -986,7 +987,7 @@
          ImGui::Dummy(ImVec2(0,10*g_viewport_mgr.m_scale));
          ImGui::SetCursorPosX((ImGui::GetWindowWidth()-120*g_viewport_mgr.m_scale)/2);
          if (ImGui::Button("Install npcap", ImVec2(120*g_viewport_mgr.m_scale, 0))) {
@@ -837,7 +843,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
          }
  #endif
      } else {
-@@ -1575,37 +1576,55 @@ void MainMenuSystemView::Draw()
+@@ -1575,37 +1576,55 @@
                 });
  }
  
@@ -917,7 +923,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
      static const char *build_info_text = NULL;
      if (build_info_text == NULL) {
          build_info_text =
-@@ -1630,10 +1649,6 @@ void MainMenuAboutView::Draw()
+@@ -1630,10 +1649,6 @@
              gl_vendor, gl_renderer, gl_version, gl_shader_version);
      }
  
@@ -928,7 +934,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
      Logo();
  
      SectionTitle("Build Information");
-@@ -1654,8 +1669,8 @@ void MainMenuAboutView::Draw()
+@@ -1654,8 +1669,8 @@
  
      SectionTitle("Config Information");
      ImGui::PushFont(g_font_mgr.m_fixed_width_font);
@@ -939,7 +945,7 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
                                ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 3),
                                ImGuiInputTextFlags_ReadOnly);
      ImGui::PopFont();
-@@ -1665,7 +1680,7 @@ void MainMenuAboutView::Draw()
+@@ -1665,7 +1680,7 @@
      ImGui::Text("Visit");
      ImGui::SameLine();
      if (ImGui::SmallButton("https://xemu.app")) {
@@ -949,7 +955,6 @@ index 85997c1a5ed13dc205a117071178456b4c79e88b..ff53efa7b15bd4c6a0747af253d58243
      ImGui::SameLine();
      ImGui::Text("for more information");
 diff --git a/ui/xui/main-menu.hh b/ui/xui/main-menu.hh
-index dccb4da771dbb65a749cbabee722812fb4cb6cd1..bb91d8aab457ee3b1ec1f53d137331ba0f91bd08 100644
 --- a/ui/xui/main-menu.hh
 +++ b/ui/xui/main-menu.hh
 @@ -17,6 +17,8 @@
@@ -961,7 +966,7 @@ index dccb4da771dbb65a749cbabee722812fb4cb6cd1..bb91d8aab457ee3b1ec1f53d137331ba
  #include <string>
  #include <vector>
  #include <memory>
-@@ -148,7 +150,14 @@ public:
+@@ -148,7 +150,14 @@
  class MainMenuAboutView : public virtual MainMenuTabView
  {
  protected:
@@ -980,11 +985,18 @@ index dccb4da771dbb65a749cbabee722812fb4cb6cd1..bb91d8aab457ee3b1ec1f53d137331ba
 diff --git a/ui/xui/main.cc b/ui/xui/main.cc
 --- a/ui/xui/main.cc
 +++ b/ui/xui/main.cc
-@@ -51,2 +51,3 @@
+@@ -49,6 +49,7 @@
+ #include "debug.hh"
+ #include "welcome.hh"
  #include "menubar.hh"
 +#include "host-ui.hh"
  #include "compat.hh"
-@@ -325,2 +326,7 @@
+ #if defined(_WIN32)
+ #include "update.hh"
+@@ -322,6 +323,11 @@
+     // if (show_demo) ImGui::ShowDemoWindow(&show_demo);
+ }
+ 
 +void xemu_hud_process_host_actions()
 +{
 +    ProcessHostUiActions();
@@ -992,8 +1004,8 @@ diff --git a/ui/xui/main.cc b/ui/xui/main.cc
 +
  void xemu_hud_render()
  {
+     ImGui::Render();
 diff --git a/ui/xui/menubar.cc b/ui/xui/menubar.cc
-index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae863b6ae91d 100644
 --- a/ui/xui/menubar.cc
 +++ b/ui/xui/menubar.cc
 @@ -20,6 +20,9 @@
@@ -1006,7 +1018,7 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
  #include "misc.hh"
  #include "widgets.hh"
  #include "monitor.hh"
-@@ -92,65 +95,74 @@ void ShowMainMenu()
+@@ -92,65 +95,74 @@
      {
          if (ImGui::BeginMenu("Machine"))
          {
@@ -1017,34 +1029,6 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
 -                if (ImGui::MenuItem("Create Snapshot")) {
 -                    xemu_snapshots_save(NULL, NULL);
 -                    xemu_queue_notification("Created new snapshot");
--                }
--
--                for (int i = 0; i < 4; ++i) {
--                    char *hotkey = g_strdup_printf("Shift+F%d", i + 5);
--
--                    char *load_name;
--                    char *save_name;
--
--                    assert(g_snapshot_shortcut_index_key_map[i]);
--                    bool bound = *(g_snapshot_shortcut_index_key_map[i]) &&
--                            (**(g_snapshot_shortcut_index_key_map[i]) != 0);
--
--                    if (bound) {
--                        load_name = g_strdup_printf("Load '%s'", *(g_snapshot_shortcut_index_key_map[i]));
--                        save_name = g_strdup_printf("Save '%s'", *(g_snapshot_shortcut_index_key_map[i]));
--                    } else {
--                        load_name = g_strdup_printf("Load F%d (Unbound)", i + 5);
--                        save_name = g_strdup_printf("Save F%d (Unbound)", i + 5);
--                    }
--
--                    ImGui::Separator();
--
--                    if (ImGui::MenuItem(load_name, hotkey + sizeof("Shift+") - 1, false, bound)) {
--                        ActionActivateBoundSnapshot(i, false);
--                    }
--
--                    if (ImGui::MenuItem(save_name, hotkey, false, bound)) {
--                        ActionActivateBoundSnapshot(i, true);
 +            // Copy snapshot names before unlocking.
 +            std::array<std::string, 4> snapshot_names;
 +            for (int i = 0; i < 4; ++i) {
@@ -1081,14 +1065,43 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
 +                            command = Command::SaveSnapshot;
 +                            snapshot_slot = i;
 +                        }
-                     }
++                    }
++                    ImGui::EndMenu();
+                 }
+ 
+-                for (int i = 0; i < 4; ++i) {
+-                    char *hotkey = g_strdup_printf("Shift+F%d", i + 5);
+-
+-                    char *load_name;
+-                    char *save_name;
+-
+-                    assert(g_snapshot_shortcut_index_key_map[i]);
+-                    bool bound = *(g_snapshot_shortcut_index_key_map[i]) &&
+-                            (**(g_snapshot_shortcut_index_key_map[i]) != 0);
+-
+-                    if (bound) {
+-                        load_name = g_strdup_printf("Load '%s'", *(g_snapshot_shortcut_index_key_map[i]));
+-                        save_name = g_strdup_printf("Save '%s'", *(g_snapshot_shortcut_index_key_map[i]));
+-                    } else {
+-                        load_name = g_strdup_printf("Load F%d (Unbound)", i + 5);
+-                        save_name = g_strdup_printf("Save F%d (Unbound)", i + 5);
+-                    }
+-
+-                    ImGui::Separator();
+-
+-                    if (ImGui::MenuItem(load_name, hotkey + sizeof("Shift+") - 1, false, bound)) {
+-                        ActionActivateBoundSnapshot(i, false);
+-                    }
+-
+-                    if (ImGui::MenuItem(save_name, hotkey, false, bound)) {
+-                        ActionActivateBoundSnapshot(i, true);
+-                    }
 -
 -                    g_free(hotkey);
 -                    g_free(load_name);
 -                    g_free(save_name);
-+                    ImGui::EndMenu();
-                 }
- 
+-                }
+-
 +                ImGui::Separator();
 +                if (ImGui::MenuItem("Eject Disc", SHORTCUT_MENU_TEXT(E))) command = Command::Eject;
 +                if (ImGui::MenuItem("Load Disc...", SHORTCUT_MENU_TEXT(O))) command = Command::LoadDisc;
@@ -1135,7 +1148,7 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
          }
  
          if (ImGui::BeginMenu("View"))
-@@ -230,19 +242,22 @@ void ShowMainMenu()
+@@ -230,19 +242,22 @@
  
          if (ImGui::BeginMenu("Help"))
          {
@@ -1155,12 +1168,13 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
 +                                &compatibility_reporter_window.is_open);
  #if defined(_WIN32)
 -            ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
-+                ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
- #endif
+-#endif
 -
 -            ImGui::Separator();
 -            if (ImGui::MenuItem("About")) g_main_menu.ShowAbout();
 -            ImGui::EndMenu();
++                ImGui::MenuItem("Check for Updates...", NULL, &update_window.is_open);
++#endif
 +                ImGui::Separator();
 +                show_about = ImGui::MenuItem("About");
 +                ImGui::EndMenu();
@@ -1170,10 +1184,9 @@ index 38e2d1b67fd331708789a5030cc91a90e260c388..96b9c48d0658f2994fe538c259afae86
  
          g_main_menu_height = ImGui::GetWindowHeight();
 diff --git a/ui/xui/meson.build b/ui/xui/meson.build
-index 95d50cb303b394edc04ef00adb2ea976ddf54a40..34351a3f75a599b78cae66a98e51761bde9bd0d4 100644
 --- a/ui/xui/meson.build
 +++ b/ui/xui/meson.build
-@@ -5,6 +5,7 @@ xemu_ss.add(files(
+@@ -5,6 +5,7 @@
    'debug.cc',
    'font-manager.cc',
    'gl-helpers.cc',
@@ -1182,7 +1195,6 @@ index 95d50cb303b394edc04ef00adb2ea976ddf54a40..34351a3f75a599b78cae66a98e51761b
    'main-menu.cc',
    'main.cc',
 diff --git a/ui/xui/misc.cc b/ui/xui/misc.cc
-index 8bc1d2ce8f993711350aebf050a8b6e7e845df75..95ce6e06c5a32dd2265978cb78b5a7229ad9c5e4 100644
 --- a/ui/xui/misc.cc
 +++ b/ui/xui/misc.cc
 @@ -17,6 +17,8 @@
@@ -1194,7 +1206,7 @@ index 8bc1d2ce8f993711350aebf050a8b6e7e845df75..95ce6e06c5a32dd2265978cb78b5a722
  #include <SDL3/SDL_init.h>
  #include <SDL3/SDL_filesystem.h>
  #include <SDL3/SDL_platform_defines.h>
-@@ -39,14 +41,34 @@ static void RunOnMainThread(std::function<void()> &&func)
+@@ -39,14 +41,34 @@
      }
  }
  
@@ -1232,7 +1244,7 @@ index 8bc1d2ce8f993711350aebf050a8b6e7e845df75..95ce6e06c5a32dd2265978cb78b5a722
                           path = std::move(path)]() { callback(path.c_str()); });
      }
  }
-@@ -85,27 +107,40 @@ void ShowOpenFileDialog(const SDL_DialogFileFilter *filters, int nfilters,
+@@ -85,27 +107,40 @@
                          const char *default_location,
                          FileDialogCallback callback)
  {
@@ -1286,10 +1298,9 @@ index 8bc1d2ce8f993711350aebf050a8b6e7e845df75..95ce6e06c5a32dd2265978cb78b5a722
 +    });
  }
 diff --git a/ui/xui/misc.hh b/ui/xui/misc.hh
-index 01ceba678ba42451e5fe23633224992812b34e94..3ef6dc1b13ef5789a970a69c174f73ebf3331841 100644
 --- a/ui/xui/misc.hh
 +++ b/ui/xui/misc.hh
-@@ -98,20 +98,18 @@ int PushWindowTransparencySettings(bool transparent, float alpha_transparent = 0
+@@ -98,20 +98,18 @@
  
  static inline gchar *GetFileMD5Checksum(const char *path)
  {
@@ -1315,10 +1326,9 @@ index 01ceba678ba42451e5fe23633224992812b34e94..3ef6dc1b13ef5789a970a69c174f73eb
  }
 -
 diff --git a/ui/xui/reporting.cc b/ui/xui/reporting.cc
-index 52a18409f40d9f0b39995c0699a5db96a3954043..a2d0e6a77a6b7b936ede3cc63dd59989d2715335 100644
 --- a/ui/xui/reporting.cc
 +++ b/ui/xui/reporting.cc
-@@ -31,7 +31,7 @@ using json = nlohmann::json;
+@@ -31,7 +31,7 @@
  
  static const char *compat_report_endpoint_url = "https://reports.xemu.app/compatibility";
  
@@ -1327,7 +1337,7 @@ index 52a18409f40d9f0b39995c0699a5db96a3954043..a2d0e6a77a6b7b936ede3cc63dd59989
  {
  }
  
-@@ -67,6 +67,7 @@ bool CompatibilityReport::Send()
+@@ -67,6 +67,7 @@
  	const std::string &s = GetSerializedReport();
  
  	int res = http_post_json(compat_report_endpoint_url, s.c_str(), NULL);
@@ -1336,7 +1346,6 @@ index 52a18409f40d9f0b39995c0699a5db96a3954043..a2d0e6a77a6b7b936ede3cc63dd59989
  		result_code = -1;
  		result_msg = "Failed to connect";
 diff --git a/ui/xui/update.cc b/ui/xui/update.cc
-index 272476e493e596645092e159073085d6c5c2948e..a7cb13739568d2cad506119b43bdbd1415eba9cb 100644
 --- a/ui/xui/update.cc
 +++ b/ui/xui/update.cc
 @@ -17,6 +17,7 @@
@@ -1347,7 +1356,7 @@ index 272476e493e596645092e159073085d6c5c2948e..a7cb13739568d2cad506119b43bdbd14
  #include "qemu/http.h"
  #include "update.hh"
  #include "viewport-manager.hh"
-@@ -96,7 +97,7 @@ void AutoUpdateWindow::Draw()
+@@ -96,7 +97,7 @@
          ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
  
          if (ImGui::SmallButton("Release notes...")) {
@@ -1357,7 +1366,6 @@ index 272476e493e596645092e159073085d6c5c2948e..a7cb13739568d2cad506119b43bdbd14
      }
  
 diff --git a/ui/xui/widgets.cc b/ui/xui/widgets.cc
-index f1e31c4ab10ffb3629d0e3d47d3e10c234a42761..66f46263012fc2723178af8cc3c10de28d347575 100644
 --- a/ui/xui/widgets.cc
 +++ b/ui/xui/widgets.cc
 @@ -17,6 +17,7 @@
@@ -1368,7 +1376,7 @@ index f1e31c4ab10ffb3629d0e3d47d3e10c234a42761..66f46263012fc2723178af8cc3c10de2
  #include "misc.hh"
  #include "font-manager.hh"
  #include "viewport-manager.hh"
-@@ -507,7 +508,7 @@ void Hyperlink(const char *text, const char *url)
+@@ -507,7 +508,7 @@
      ImGui::GetWindowDrawList()->AddLine(min, max, col, 1.0 * g_viewport_mgr.m_scale);
  
      if (ImGui::IsItemClicked()) {
@@ -1380,7 +1388,11 @@ index f1e31c4ab10ffb3629d0e3d47d3e10c234a42761..66f46263012fc2723178af8cc3c10de2
 diff --git a/ui/xui/xemu-hud.h b/ui/xui/xemu-hud.h
 --- a/ui/xui/xemu-hud.h
 +++ b/ui/xui/xemu-hud.h
-@@ -48,2 +48,3 @@
+@@ -46,6 +46,7 @@
+ void xemu_hud_render(void);
+ void xemu_hud_process_sdl_events(SDL_Event *event);
  void xemu_hud_should_capture_kbd_mouse(int *kbd, int *mouse);
 +void xemu_hud_process_host_actions(void);
  void xemu_hud_set_framebuffer_texture(GLuint tex, bool flip);
+ 
+ #ifdef __cplusplus

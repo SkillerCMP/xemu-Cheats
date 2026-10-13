@@ -3,13 +3,15 @@
 
 The old Debug Tools guards intentionally freeze renderer behavior. They must
 not be weakened to accept a core optimization. --baseline-phase makes a private
-source copy, reverses ONLY Fix60 with git apply, and runs those unchanged guards
-there. The caller's source and build output are never modified.
+copy, removes Debug Tools integration, reverses only Fix60, then reinstalls the
+matching observation-only integration and runs those unchanged guards there.
+The caller's source and build output are never modified.
 Requires Python 3, git, a C compiler; baseline native tests also need C++.
 No Vulkan device or complete emulator build is exercised by these tests.
 """
 from __future__ import annotations
 import argparse
+import json
 import pathlib
 import shutil
 import subprocess
@@ -56,18 +58,43 @@ def main() -> int:
     print('=== Actual Fix60 planner / renderer helpers / lifecycle ===', flush=True)
     run(command, source)
     if args.baseline_phase:
-        print('=== Historical guards: reverse only Fix60 IN A TEMPORARY COPY ===',
+        print('=== Historical guards: remove only Fix60 from a private core stack ===',
               flush=True)
         with tempfile.TemporaryDirectory(prefix='xemu-fix60-baseline-') as directory:
             baseline = pathlib.Path(directory) / 'source'
             shutil.copytree(source, baseline, symlinks=True,
                             ignore=shutil.ignore_patterns('.git', '__pycache__',
                                                          '*.pyc'))
+            variants = baseline / 'ui/xui/debug-tools/tools/patch300-variants'
+            state_path = variants / 'applied.json'
+            selected = None
+            canonical = patch.parent / '300-CMP-PATCH-ADDITION.patch'
+            if state_path.is_file():
+                state = json.loads(state_path.read_text())
+                manifest = json.loads((variants / 'manifest.json').read_text())
+                selected = set(state['optional_patches'])
+                if 60 not in selected:
+                    parser.error('the recorded core stack does not contain Fix60')
+                entry = manifest['variants'][state['mask']]
+                integration = (canonical if state['mask'] == manifest['canonical_mask']
+                               else variants / entry['path'])
+                for check in (True, False):
+                    command = ['git', 'apply', '--reverse', '--whitespace=nowarn']
+                    if check:
+                        command.append('--check')
+                    run(command + [str(integration)], baseline)
             for check in (True, False):
                 command = ['git', 'apply', '--reverse', '--whitespace=nowarn']
                 if check:
                     command.append('--check')
                 run(command + [str(patch)], baseline)
+            if selected is not None:
+                selected.remove(60)
+                value = ','.join(str(n) for n in sorted(selected)) or 'none'
+                run([sys.executable,
+                     str(baseline / 'ui/xui/debug-tools/tools/apply-patch300.py'),
+                     '--source', str(baseline), '--patch', str(canonical),
+                     '--optional-patches', value], baseline)
             runner = baseline / 'ui/xui/debug-tools/tests/v287-run-regression-tests.py'
             if not runner.is_file():
                 parser.error('Baseline phases require the optional Debug Tools source')
@@ -75,6 +102,8 @@ def main() -> int:
                 command = [sys.executable, str(runner), '--root', str(baseline),
                            '--phase', phase, '--compiler', args.cxx,
                            '--jobs', str(args.jobs)]
+                if selected is not None:
+                    command += ['--optional-patches', value]
                 for pattern in args.test:
                     command += ['--test', pattern]
                 run(command, baseline)

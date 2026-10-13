@@ -11,8 +11,8 @@ FIX_ROOT="$2"
 
 [[ -d "$SRC" ]] || { echo "FIX overlay: source root does not exist: $SRC" >&2; exit 1; }
 
-# Sort optional FIX paths by natural basename order. Patch 300 is selected
-# separately as the foundation, then 10 -> 20 -> 30 -> 40 -> 50 are applied.
+# Independent core patches use natural basename order. Debug Tools integration
+# is applied afterward and never supplies a prerequisite for a core fix.
 sort_fix_paths_natural() {
   python3 -c '
 import os, re, sys
@@ -57,20 +57,34 @@ while IFS= read -r archive; do
   rm -rf "$TMP_FIX"
 done < <(find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.zip' -print | sort_fix_paths_natural)
 
-# Apply top-level source patches next. Patch 300 is the integration/observation
-# foundation and is applied first; optional behavioral fixes 10/20/30/40/50 are
-# then applied in natural numeric order. This lets any subset of 10-50 be
-# removed without changing Patch 300 or its Debug Tools hooks. We prefer git apply
-# because it understands normal Git patches (including mode/binary metadata).
+# Apply independent source patches first. The matched Debug Tools ZIP selects
+# observation-only Patch 300 integration for the explicitly enabled core stack.
+# We prefer git apply because it understands normal Git patch metadata.
 # If git's stricter context matching rejects a text patch only because earlier
 # fixes shifted its hunk location, fall back to patch(1) with fuzz disabled.
 # That fallback allows line offsets but still requires every context line to
 # match exactly. A real overlap/incompatibility therefore stops the build.
+selected_optional=()
 while IFS= read -r patch_file; do
   [[ -n "$patch_file" ]] || continue
   applied=1
   patch_name="$(basename "$patch_file")"
   echo "FIX source patch: $patch_name"
+
+  if [[ "$patch_name" =~ ^(10|20|30|40|50|60)- ]]; then
+    selected_optional+=("${BASH_REMATCH[1]}")
+    # Check additions, removals and context: any Debug Tools reference in an
+    # independent patch is an ownership violation, even if it is only context.
+    python3 - "$patch_file" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+pattern = re.compile(r'xemu_debug_tools|XemuDebugTools|XEMU_DEBUG_TOOLS|debug[-_]tools|PGRAPH_(?:UN)?LOCK|pgraph_(?:un)?lock_observed')
+hits = [str(i) for i, line in enumerate(path.read_text().splitlines(), 1)
+        if pattern.search(line)]
+if hits:
+    raise SystemExit(f'FIX ownership ERROR: {path.name}: Debug Tools reference at lines {", ".join(hits)}; move it to Patch 300 or the Debug Tools ZIP')
+PY
+  fi
 
   GIT_LOG="$(mktemp "${TMPDIR:-/tmp}/xemu-git-apply.XXXXXX")"
   PATCH_LOG="$(mktemp "${TMPDIR:-/tmp}/xemu-patch-apply.XXXXXX")"
@@ -102,10 +116,32 @@ while IFS= read -r patch_file; do
   rm -f "$GIT_LOG" "$PATCH_LOG"
   echo "FIX patch applied: $patch_name ($patch_method)"
 done < <(
-  find "$FIX_ROOT" -maxdepth 1 -type f -name '300-CMP-PATCH-ADDITION.patch' -print
   find "$FIX_ROOT" -maxdepth 1 -type f -iname '*.patch' \
     ! -name '300-CMP-PATCH-ADDITION.patch' -print | sort_fix_paths_natural
 )
+
+# The canonical Patch 300 file is for the full core stack. Reviewed integration
+# variants in the addon ZIP preserve any optional-fix subset without changing
+# its core behavior. Input and patch hashes are checked before any integration.
+integration_patch="$FIX_ROOT/300-CMP-PATCH-ADDITION.patch"
+integration_helper="$SRC/ui/xui/debug-tools/tools/apply-patch300.py"
+if [[ -f "$integration_patch" ]]; then
+  [[ -f "$integration_helper" ]] || {
+    echo 'FIX overlay ERROR: Patch 300 requires its matched Debug Tools ZIP.' >&2
+    exit 1
+  }
+  optional_csv='none'
+  if [[ ${#selected_optional[@]} -gt 0 ]]; then
+    printf -v optional_csv '%s,' "${selected_optional[@]}"
+    optional_csv="${optional_csv%,}"
+  fi
+  python3 "$integration_helper" --source "$SRC" --patch "$integration_patch" \
+    --optional-patches "$optional_csv"
+  applied=1
+elif [[ -f "$integration_helper" ]]; then
+  echo 'FIX overlay ERROR: the Debug Tools ZIP requires its matched Patch 300.' >&2
+  exit 1
+fi
 
 # Loose files are applied last and therefore have highest precedence. This
 # makes quick one-file experiments easy without rebuilding a fix-pack ZIP.

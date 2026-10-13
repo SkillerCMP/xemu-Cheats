@@ -1,0 +1,89 @@
+XEMU-CHEATS DEBUGGER / CORE FIX SEPARATION VALIDATION
+Input: NEW-xemu-Cheats(1).zip
+Input SHA256: 224b8ab3a30e9d6f0732a6cb497bafb55294515f48a9a85cdbd662b6903dc413
+Input size: 48533304 bytes
+
+RESULT
+Fixes 10/20/30/40/50/60 are separate, independent stock-source patches.
+All Debug Tools references, including patch context and test stubs/filtering,
+are excluded from those six patches. Debugger integration and test hooks are
+owned by Patch 300; addon implementation and reviewed integration selection
+are owned by CMP-Official-Debug-Tools.zip.
+
+The complete assembled emulator/addon production source, headers, build and
+configuration files are BYTE-IDENTICAL to the current original full stack.
+No compiled emulator or addon implementation was changed by this reorganization.
+This verifies the build inputs; it is not an executable or in-game test.
+
+CHECK 1 - OWNERSHIP AND INDEPENDENT APPLICATION
+PASS: every fix applies alone to untouched source, without Patch 300/addons.
+PASS: all 64 optional-fix combinations assemble without Debug Tools.
+PASS: the same 64 combinations assemble with matched Debug Tools integration.
+PASS: each instrumented combination matches the original ordered stack's
+      production source exactly. Fix 40 has no Debug Tools integration surface.
+Both supplied official/prerelease snapshots have identical bytes in every
+relevant patch target; these checks therefore cover both supplied source bases.
+
+CHECK 2 - SOURCE AND NATIVE PARITY
+Original full source logical files: 11859
+Unchanged original file contents: 11853
+Changed existing nonproduction files: 6
+New integration metadata/tool files: 34
+PASS: upstream source ZIP bytes and workflows preserved.
+PASS: Debugger/addon C/C++ implementations preserved byte for byte.
+PASS: actual Fix 10 host-poll helpers: detached sampling, mapping/axis behavior,
+      cache commit, interval gating, stale/disconnected/removed-device rejection.
+PASS: actual Fix 20 helpers: atomic surfaces/dirty bits, CPU-MMIO handoff,
+      bounded PFIFO kick under mutex contention.
+PASS: actual Fix 50 stock-UI native tests, including host work outside locks,
+      copied dialog/URL lifetimes, async hashing, report snapshot/send and
+      synchronized guest callbacks.
+PASS: actual Fix 60 native planner: 30,000 randomized cases; 4,000 draw-helper
+      cases; retained bytes, fallback, allocation failure and lifecycle checks.
+PASS: four unsafe Fix 60 negative controls rejected.
+PASS: 25 Debug Tools host-native C++ golden executables completed.
+Assembler-golden was SKIPPED: native Keystone/pkg-config is unavailable.
+
+Current full stack static results: 90 PASS / 93 on original and corrected.
+No new static failures. The same existing historical fingerprints fail:
+  v314ab-vertex-coverage-golden.py
+  v314y-vulkan-observer-order-golden.py
+  v314z-pfifo-draw-aggregate-golden.py
+The old full-stack native renderer harness also lacks Fix 60 fake-state members.
+Those guards were not weakened or disabled. The updated verification helper
+removes only Fix 60 from a private copy, reapplies matching observation-only
+integration, and passes the COMPLETE static/native historical suite there.
+
+CHECK 3 - GUARDS, PROFILES AND ARCHIVE REPLAY
+PASS: forbidden Debug Tools hook in an independent patch stops the build.
+PASS: altered/mismatched Patch 300 and unexpected core source are rejected.
+PASS: both complete reviewed workflow baselines accepted; mixed/arbitrary sets
+      rejected. The single upstream build.sh integration invariant is retained.
+PASS: all five profiles: main, main+hdd, main+memory, full, folder-hdd.
+PASS: new Python/Bash helpers syntax-checked.
+PASS: inner/outer ZIP CRCs, payloads, checksums and fresh full reconstruction.
+
+INTENTIONAL NONPRODUCTION DIFFERENCES
+The landing/test documentation describes the new ownership/order.
+The layout validator accepts the exact supplied prerelease workflow hashes,
+while retaining the older complete baseline and rejecting mixed/unknown ones.
+The test runner describes core-first ordering; its optional assertions remain
+mandatory when declared.
+Fix 50's original new-file hunk declared 72 lines but contained 75. Its final
+three original test-run lines are now included and execute; no emulator code
+was changed by this correction.
+Reviewed Patch 300 variants preserve optional subsets. Checksums are validated
+before integration. No independent fix is implemented by the selector.
+
+BUILD ORDER
+Addon files -> selected independent fixes 10/20/30/40/50/60 -> Patch 300
+integration for that exact stack -> loose user overlays (existing precedence).
+The canonical Patch 300 file is the full-stack integration. Build-All.bat selects
+matching integration automatically for subsets; keep its paired addon ZIP.
+To build core fixes only, remove both Patch 300 and the Debug Tools ZIP.
+
+LIMITS
+Docker, SDL3 and full platform build dependencies are unavailable here.
+No complete Windows/Linux/macOS emulator executable, real Vulkan device or
+gameplay test was performed. Runtime/binary parity is inferred from identical
+production/build source, not claimed as a measured platform execution result.

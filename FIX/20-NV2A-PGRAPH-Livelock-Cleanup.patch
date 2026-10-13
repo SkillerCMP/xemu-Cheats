@@ -1,8 +1,7 @@
 diff --git a/hw/xbox/nv2a/nv2a.c b/hw/xbox/nv2a/nv2a.c
-index 3595d8b..c1faaa0 100644
 --- a/hw/xbox/nv2a/nv2a.c
 +++ b/hw/xbox/nv2a/nv2a.c
-@@ -43,7 +43,8 @@ void nv2a_update_irq(NV2AState *d)
+@@ -39,7 +39,8 @@
      }
  
      /* PGRAPH */
@@ -12,7 +11,7 @@ index 3595d8b..c1faaa0 100644
          d->pmc.pending_interrupts |= NV_PMC_INTR_0_PGRAPH;
      } else {
          d->pmc.pending_interrupts &= ~NV_PMC_INTR_0_PGRAPH;
-@@ -351,9 +352,9 @@ static void nv2a_reset(NV2AState *d)
+@@ -320,9 +321,9 @@
      /* seems to start in color mode */
      d->vga.msr = VGA_MIS_COLOR;
  
@@ -25,10 +24,9 @@ index 3595d8b..c1faaa0 100644
      d->pmc.pending_interrupts = 0;
      d->pfifo.pending_interrupts = 0;
 diff --git a/hw/xbox/nv2a/pfifo.c b/hw/xbox/nv2a/pfifo.c
-index 8690916..0071320 100644
 --- a/hw/xbox/nv2a/pfifo.c
 +++ b/hw/xbox/nv2a/pfifo.c
-@@ -92,7 +92,7 @@ void pfifo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+@@ -91,7 +91,7 @@
  
  void pfifo_kick(NV2AState *d)
  {
@@ -37,7 +35,7 @@ index 8690916..0071320 100644
      qemu_cond_broadcast(&d->pfifo.fifo_cond);
  }
  
-@@ -108,7 +108,7 @@ static bool is_flip_stall_complete(NV2AState *d)
+@@ -107,7 +107,7 @@
  {
      PGRAPHState *pg = &d->pgraph;
  
@@ -46,12 +44,12 @@ index 8690916..0071320 100644
  
      NV2A_DPRINTF("flip stall read: %d, write: %d, modulo: %d\n",
          GET_MASK(s, NV_PGRAPH_SURFACE_READ_3D),
-@@ -191,12 +191,13 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -186,12 +186,13 @@
  
          // TODO: this is fucked
          qemu_mutex_unlock(&d->pfifo.lock);
 +        pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
-         PGRAPH_LOCK(&d->pgraph);
+         qemu_mutex_lock(&d->pgraph.lock);
  
          // Switch contexts if necessary
          if (can_fifo_access(d)) {
@@ -61,15 +59,15 @@ index 8690916..0071320 100644
                  num_proc =
                      pgraph_method(d, subchannel, 0, entry.instance, parameters,
                                    num_words_available, max_lookahead_words, inc);
-@@ -226,6 +227,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
+@@ -221,6 +222,7 @@
  
          // TODO: this is fucked
          qemu_mutex_unlock(&d->pfifo.lock);
 +        pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
-         PGRAPH_LOCK(&d->pgraph);
+         qemu_mutex_lock(&d->pgraph.lock);
  
          if (can_fifo_access(d)) {
-@@ -464,7 +466,7 @@ void *pfifo_thread(void *arg)
+@@ -459,7 +461,7 @@
  
      qemu_mutex_lock(&d->pfifo.lock);
      while (true) {
@@ -78,7 +76,7 @@ index 8690916..0071320 100644
  
          pgraph_process_pending(d);
  
-@@ -474,7 +476,7 @@ void *pfifo_thread(void *arg)
+@@ -469,7 +471,7 @@
  
          pgraph_process_pending_reports(d);
  
@@ -88,37 +86,37 @@ index 8690916..0071320 100644
  
              // Both the pusher and puller are waiting for some action
 diff --git a/hw/xbox/nv2a/pgraph/gl/renderer.c b/hw/xbox/nv2a/pgraph/gl/renderer.c
-index fbfe23b..54da4ed 100644
 --- a/hw/xbox/nv2a/pgraph/gl/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/gl/renderer.c
-@@ -127,6 +127,7 @@ static void pgraph_gl_process_pending(NV2AState *d)
+@@ -127,6 +127,7 @@
          qatomic_read(&d->pgraph.flush_pending) ||
          qatomic_read(&r->shader_cache_writeback_pending)) {
          qemu_mutex_unlock(&d->pfifo.lock);
 +        pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
-         PGRAPH_LOCK(&d->pgraph);
+         qemu_mutex_lock(&d->pgraph.lock);
          if (qatomic_read(&r->downloads_pending)) {
              pgraph_gl_process_pending_downloads(d);
 diff --git a/hw/xbox/nv2a/pgraph/null/renderer.c b/hw/xbox/nv2a/pgraph/null/renderer.c
-index 6454927..feb0324 100644
 --- a/hw/xbox/nv2a/pgraph/null/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/null/renderer.c
-@@ -41,6 +41,7 @@ static void pgraph_null_process_pending(NV2AState *d)
+@@ -41,6 +41,7 @@
          qatomic_read(&d->pgraph.flush_pending)
          ) {
          qemu_mutex_unlock(&d->pfifo.lock);
 +        pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
-         PGRAPH_LOCK(&d->pgraph);
+         qemu_mutex_lock(&d->pgraph.lock);
          if (qatomic_read(&d->pgraph.sync_pending)) {
              pgraph_null_sync(d);
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.c b/hw/xbox/nv2a/pgraph/pgraph.c
-index 84650c7..8314b8a 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.c
 +++ b/hw/xbox/nv2a/pgraph/pgraph.c
-@@ -43,21 +43,84 @@
+@@ -36,24 +36,86 @@
+         pgraph_reg_w(pg, reg, rv);           \
+     } while (0)
  
+-
  NV2AState *g_nv2a;
- 
++
 +static inline uint32_t pgraph_surface_read(PGRAPHState *pg)
 +{
 +    return qatomic_read(&pg->regs_[NV_PGRAPH_SURFACE]);
@@ -159,7 +157,7 @@ index 84650c7..8314b8a 100644
 +        cpu_relax();
 +    }
 +}
-+
+ 
  uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
  {
      NV2AState *d = (NV2AState *)opaque;
@@ -193,7 +191,7 @@ index 84650c7..8314b8a 100644
 +        bql_unlock();
 +    }
 +
-     PGRAPH_LOCK(pg);
+     qemu_mutex_lock(&pg->lock);
  
      uint64_t r = 0;
      switch (addr) {
@@ -206,9 +204,9 @@ index 84650c7..8314b8a 100644
      case NV_PGRAPH_RDI_DATA: {
          unsigned int select = PG_GET_MASK(NV_PGRAPH_RDI_INDEX,
                                         NV_PGRAPH_RDI_INDEX_SELECT);
-@@ -80,6 +143,12 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
+@@ -76,6 +138,12 @@
  
-     PGRAPH_UNLOCK(pg);
+     qemu_mutex_unlock(&pg->lock);
  
 +    /* Drop pgraph.lock before reacquiring BQL. */
 +    if (had_bql) {
@@ -219,39 +217,10 @@ index 84650c7..8314b8a 100644
      nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
      return r;
  }
-@@ -89,95 +158,179 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
-     NV2AState *d = (NV2AState *)opaque;
-     PGRAPHState *pg = &d->pgraph;
+@@ -87,35 +155,111 @@
  
--    /* Diagnostics fallback for the stock PGRAPH path. Patch 20 replaces this
--     * with its lock-decoupled increment path, but the same trace ABI remains
--     * available when Patch 20 is intentionally omitted for isolation tests. */
--    const uint64_t trace_threshold =
--        (addr == NV_PGRAPH_INCREMENT)
--            ? xemu_debug_tools_pgraph_increment_trace_threshold_ns() : 0;
--    XemuDebugToolsPgraphIncrementEvent trace = { 0 };
--    uint64_t trace_stage_start = 0;
--    if (trace_threshold != 0) {
--        trace.threshold_ns = trace_threshold;
--        trace.host_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
--        trace.virtual_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
--        trace.value = (uint32_t)val;
--        trace.had_bql = bql_locked() ? 1 : 0;
--    }
--
      nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
  
--    qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
--    if (trace_threshold != 0) {
--        trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
--    }
--    PGRAPH_LOCK(pg);
--    if (trace_threshold != 0) {
--        /* Stock has one renderer lock rather than Patch 20's surface_lock.
--         * Preserve the stage field by measuring the equivalent serialization
--         * wait here; Patch 20 restores the dedicated surface-lock timing. */
--        trace.surface_lock_wait_ns =
--            qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
 +    if (addr == NV_PGRAPH_FIFO) {
 +        bool had_bql = bql_locked();
 +        if (had_bql) {
@@ -277,11 +246,8 @@ index 84650c7..8314b8a 100644
 +            bql_lock();
 +        }
 +        return;
-     }
- 
--    switch (addr) {
--    case NV_PGRAPH_INTR:
--        pg->pending_interrupts &= ~val;
++    }
++
 +    /*
 +     * Interrupt acknowledgement must not wait for renderer-owned pgraph.lock.
 +     */
@@ -292,31 +258,22 @@ index 84650c7..8314b8a 100644
 +        }
 +
 +        qemu_mutex_lock(&pg->interrupt_lock);
- 
--        if (!(pg->pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
--            pg->waiting_for_nop = false;
++
 +        uint32_t clear_mask = ~(uint32_t)val;
 +        uint32_t pending =
 +            qatomic_fetch_and(&pg->pending_interrupts, clear_mask) & clear_mask;
 +
 +        if (!(pending & NV_PGRAPH_INTR_ERROR)) {
 +            qatomic_set(&pg->waiting_for_nop, false);
-         }
--        if (!(pg->pending_interrupts & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
--            pg->waiting_for_context_switch = false;
++        }
 +        if (!(pending & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
 +            qatomic_set(&pg->waiting_for_context_switch, false);
-         }
++        }
 +
 +        qemu_mutex_unlock(&pg->interrupt_lock);
 +
 +        qemu_mutex_lock(&d->pfifo.lock);
-         pfifo_kick(d);
--        break;
--    case NV_PGRAPH_INTR_EN:
--        pg->enabled_interrupts = val;
--        break;
--    case NV_PGRAPH_INCREMENT:
++        pfifo_kick(d);
 +        qemu_mutex_unlock(&d->pfifo.lock);
 +
 +        if (had_bql) {
@@ -327,120 +284,31 @@ index 84650c7..8314b8a 100644
 +
 +    /* Flip-ring consumption must not wait for renderer-owned pgraph.lock. */
 +    if (addr == NV_PGRAPH_INCREMENT) {
-+        const uint64_t trace_threshold =
-+            xemu_debug_tools_pgraph_increment_trace_threshold_ns();
-+        XemuDebugToolsPgraphIncrementEvent trace = { 0 };
-+        uint64_t stage_start = 0;
 +        bool had_bql = bql_locked();
 +
-+        if (trace_threshold != 0) {
-+            trace.threshold_ns = trace_threshold;
-+            trace.host_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            trace.virtual_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+            trace.value = (uint32_t)val;
-+            trace.had_bql = had_bql ? 1 : 0;
-+        }
 +        if (had_bql) {
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
 +            bql_unlock();
-+            if (trace_threshold != 0) {
-+                trace.bql_release_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
 +        }
 +
-         if (val & NV_PGRAPH_INCREMENT_READ_3D) {
--            const uint32_t surface_before = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
--            const uint32_t read_before =
--                GET_MASK(surface_before, NV_PGRAPH_SURFACE_READ_3D);
--            const uint32_t modulo =
--                GET_MASK(surface_before, NV_PGRAPH_SURFACE_MODULO_3D);
-             if (trace_threshold != 0) {
--                trace.surface_before = surface_before;
--                trace.read_before = read_before;
--                trace.modulo = modulo;
--                trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
++        if (val & NV_PGRAPH_INCREMENT_READ_3D) {
 +            qemu_mutex_lock(&pg->surface_lock);
-+            if (trace_threshold != 0) {
-+                trace.surface_lock_wait_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-             }
- 
--            PG_SET_MASK(NV_PGRAPH_SURFACE,
--                     NV_PGRAPH_SURFACE_READ_3D,
--                     (read_before + 1) % modulo);
++
 +            uint32_t surface = pgraph_surface_read(pg);
 +            uint32_t read = GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D);
 +            uint32_t modulo = GET_MASK(surface, NV_PGRAPH_SURFACE_MODULO_3D);
-+            if (trace_threshold != 0) {
-+                trace.surface_before = surface;
-+                trace.read_before = read;
-+                trace.modulo = modulo;
-+            }
- 
--            const uint32_t surface_after = pgraph_reg_r(pg, NV_PGRAPH_SURFACE);
--            const uint32_t read_after =
--                GET_MASK(surface_after, NV_PGRAPH_SURFACE_READ_3D);
++
 +            SET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D,
 +                     (read + 1) % modulo);
 +            pgraph_surface_write_locked(pg, surface);
-             if (trace_threshold != 0) {
--                trace.surface_after = surface_after;
--                trace.read_after = read_after;
-+                trace.surface_after = surface;
-+                trace.read_after =
-+                    GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D);
-                 trace.surface_update_ns =
--                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-             }
- 
++
 +            qemu_mutex_unlock(&pg->surface_lock);
 +
-             xemu_debug_tools_flip_stall_trace_record(
-                 XEMU_DEBUG_TOOLS_FLIP_VBLANK_READ_INCREMENT, pg,
--                NV097_SET_FLIP_READ, (uint32_t)val, read_before,
--                read_after, 0);
-+                NV097_SET_FLIP_READ, (uint32_t)val, read,
-+                GET_MASK(surface, NV_PGRAPH_SURFACE_READ_3D), 0);
- 
-             nv2a_profile_increment();
-             if (trace_threshold != 0) {
--                trace_stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-             }
--            pfifo_kick(d);
++            nv2a_profile_increment();
 +            pgraph_pfifo_kick_nonblocking(d);
-             if (trace_threshold != 0) {
-                 trace.pfifo_kick_ns =
--                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - trace_stage_start;
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-             }
-         }
++        }
 +
 +        if (had_bql) {
-+            if (trace_threshold != 0) {
-+                stage_start = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            }
 +            bql_lock();
-+            if (trace_threshold != 0) {
-+                trace.bql_reacquire_wait_ns =
-+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - stage_start;
-+            }
-+        }
-+        if (trace_threshold != 0) {
-+            trace.host_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-+            trace.virtual_end_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+            trace.host_duration_ns = trace.host_end_ns - trace.host_start_ns;
-+            trace.virtual_duration_ns =
-+                (int64_t)trace.virtual_end_ns -
-+                (int64_t)trace.virtual_start_ns;
-+            xemu_debug_tools_pgraph_increment_trace_record(&trace);
 +        }
 +        return;
 +    }
@@ -452,16 +320,40 @@ index 84650c7..8314b8a 100644
 +        bql_unlock();
 +    }
 +
-+    qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
-+    PGRAPH_LOCK(pg);
-+
-+    switch (addr) {
-+    case NV_PGRAPH_INTR_EN:
+     qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
+     qemu_mutex_lock(&pg->lock);
+ 
+     switch (addr) {
+-    case NV_PGRAPH_INTR:
+-        pg->pending_interrupts &= ~val;
+-
+-        if (!(pg->pending_interrupts & NV_PGRAPH_INTR_ERROR)) {
+-            pg->waiting_for_nop = false;
+-        }
+-        if (!(pg->pending_interrupts & NV_PGRAPH_INTR_CONTEXT_SWITCH)) {
+-            pg->waiting_for_context_switch = false;
+-        }
+-        pfifo_kick(d);
+-        break;
+     case NV_PGRAPH_INTR_EN:
+-        pg->enabled_interrupts = val;
+-        break;
+-    case NV_PGRAPH_INCREMENT:
+-        if (val & NV_PGRAPH_INCREMENT_READ_3D) {
+-            PG_SET_MASK(NV_PGRAPH_SURFACE,
+-                     NV_PGRAPH_SURFACE_READ_3D,
+-                     (PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                              NV_PGRAPH_SURFACE_READ_3D)+1)
+-                        % PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                                   NV_PGRAPH_SURFACE_MODULO_3D) );
+-            nv2a_profile_increment();
+-            pfifo_kick(d);
+-        }
 +        qatomic_set(&pg->enabled_interrupts, (uint32_t)val);
          break;
      case NV_PGRAPH_RDI_DATA: {
          unsigned int select = PG_GET_MASK(NV_PGRAPH_RDI_INDEX,
-@@ -223,6 +376,11 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+@@ -161,6 +305,11 @@
  
          break;
      }
@@ -473,28 +365,19 @@ index 84650c7..8314b8a 100644
      default:
          pgraph_reg_w(pg, addr, val);
          break;
-@@ -238,17 +396,9 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
-     PGRAPH_UNLOCK(pg);
-     qemu_mutex_unlock(&d->pfifo.lock);
+@@ -175,6 +324,11 @@
  
--    if (trace_threshold != 0) {
--        /* Stock never drops BQL in this path, so there is no reacquire wait.
--         * Keep the field explicit so the profiler output remains comparable. */
--        trace.bql_reacquire_wait_ns = 0;
--        trace.bql_held_after = bql_locked() ? 1 : 0;
--        trace.host_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
--        trace.virtual_end_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
--        trace.host_duration_ns = trace.host_end_ns - trace.host_start_ns;
--        trace.virtual_duration_ns =
--            (int64_t)trace.virtual_end_ns - (int64_t)trace.virtual_start_ns;
--        xemu_debug_tools_pgraph_increment_trace_record(&trace);
+     qemu_mutex_unlock(&pg->lock);
+     qemu_mutex_unlock(&d->pfifo.lock);
++
 +    if (had_bql) {
 +        pgraph_cpu_mmio_access_end(pg);
 +        bql_lock();
-     }
++    }
  }
  
-@@ -272,10 +422,13 @@ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
+ void pgraph_context_switch(NV2AState *d, unsigned int channel_id)
+@@ -197,10 +351,13 @@
          assert(!PG_GET_MASK(NV_PGRAPH_DEBUG_3,
                              NV_PGRAPH_DEBUG_3_HW_CONTEXT_SWITCH));
  
@@ -504,13 +387,13 @@ index 84650c7..8314b8a 100644
 +        qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_CONTEXT_SWITCH);
 +        qemu_mutex_unlock(&pg->interrupt_lock);
 +
-         PGRAPH_UNLOCK(pg);
+         qemu_mutex_unlock(&pg->lock);
          bql_lock();
 -        pg->pending_interrupts |= NV_PGRAPH_INTR_CONTEXT_SWITCH;
          nv2a_update_irq(d);
          bql_unlock();
-         PGRAPH_LOCK(pg);
-@@ -297,6 +450,11 @@ void pgraph_init(NV2AState *d)
+         qemu_mutex_lock(&pg->lock);
+@@ -222,6 +379,11 @@
      PGRAPHState *pg = &d->pgraph;
      qemu_mutex_init(&pg->lock);
      qemu_mutex_init(&pg->renderer_lock);
@@ -522,7 +405,7 @@ index 84650c7..8314b8a 100644
      qemu_event_init(&pg->sync_complete, false);
      qemu_event_init(&pg->flush_complete, false);
      qemu_cond_init(&pg->framebuffer_released);
-@@ -426,6 +584,10 @@ void pgraph_destroy(PGRAPHState *pg)
+@@ -351,6 +513,10 @@
         pg->renderer->ops.finalize(d);
      }
  
@@ -533,7 +416,7 @@ index 84650c7..8314b8a 100644
      qemu_mutex_destroy(&pg->lock);
  }
  
-@@ -914,7 +1076,7 @@ DEF_METHOD(NV097, NO_OPERATION)
+@@ -835,7 +1001,7 @@
      unsigned channel_id =
          PG_GET_MASK(NV_PGRAPH_CTX_USER, NV_PGRAPH_CTX_USER_CHID);
  
@@ -542,7 +425,7 @@ index 84650c7..8314b8a 100644
  
      PG_SET_MASK(NV_PGRAPH_TRAPPED_ADDR, NV_PGRAPH_TRAPPED_ADDR_CHID,
               channel_id);
-@@ -925,8 +1087,10 @@ DEF_METHOD(NV097, NO_OPERATION)
+@@ -846,8 +1012,10 @@
      pgraph_reg_w(pg, NV_PGRAPH_TRAPPED_DATA_LOW, parameter);
      pgraph_reg_w(pg, NV_PGRAPH_NSOURCE,
                   NV_PGRAPH_NSOURCE_NOTIFICATION); /* TODO: check this */
@@ -553,52 +436,50 @@ index 84650c7..8314b8a 100644
 +    qatomic_or(&pg->pending_interrupts, NV_PGRAPH_INTR_ERROR);
 +    qemu_mutex_unlock(&pg->interrupt_lock);
  
-     PGRAPH_UNLOCK(pg);
+     qemu_mutex_unlock(&pg->lock);
      bql_lock();
-@@ -942,42 +1106,48 @@ DEF_METHOD(NV097, WAIT_FOR_IDLE)
+@@ -863,36 +1031,39 @@
  
  DEF_METHOD(NV097, SET_FLIP_READ)
  {
+-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D,
+-             parameter);
 +    qemu_mutex_lock(&pg->surface_lock);
 +    pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_READ_3D, parameter);
 +    qemu_mutex_unlock(&pg->surface_lock);
-     xemu_debug_tools_flip_stall_trace_record(
--        XEMU_DEBUG_TOOLS_FLIP_SET_READ, pg, NV097_SET_FLIP_READ, parameter, 0, 0, 0);
--    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_READ_3D,
--             parameter);
-+        XEMU_DEBUG_TOOLS_FLIP_SET_READ, pg, NV097_SET_FLIP_READ,
-+        parameter, 0, 0, 0);
  }
  
  DEF_METHOD(NV097, SET_FLIP_WRITE)
  {
+-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D,
+-             parameter);
 +    qemu_mutex_lock(&pg->surface_lock);
 +    pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_WRITE_3D, parameter);
 +    qemu_mutex_unlock(&pg->surface_lock);
-     xemu_debug_tools_flip_stall_trace_record(
--        XEMU_DEBUG_TOOLS_FLIP_SET_WRITE, pg, NV097_SET_FLIP_WRITE, parameter, 0, 0, 0);
--    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D,
--             parameter);
-+        XEMU_DEBUG_TOOLS_FLIP_SET_WRITE, pg, NV097_SET_FLIP_WRITE,
-+        parameter, 0, 0, 0);
  }
  
  DEF_METHOD(NV097, SET_FLIP_MODULO)
  {
+-    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_MODULO_3D,
+-             parameter);
 +    qemu_mutex_lock(&pg->surface_lock);
 +    pgraph_surface_set_mask_locked(pg, NV_PGRAPH_SURFACE_MODULO_3D, parameter);
 +    qemu_mutex_unlock(&pg->surface_lock);
-     xemu_debug_tools_flip_stall_trace_record(
--        XEMU_DEBUG_TOOLS_FLIP_SET_MODULO, pg, NV097_SET_FLIP_MODULO, parameter, 0, 0, 0);
--    PG_SET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_MODULO_3D,
--             parameter);
-+        XEMU_DEBUG_TOOLS_FLIP_SET_MODULO, pg, NV097_SET_FLIP_MODULO,
-+        parameter, 0, 0, 0);
  }
  
  DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
  {
 -    uint32_t old =
+-        PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
+-
+-    PG_SET_MASK(NV_PGRAPH_SURFACE,
+-             NV_PGRAPH_SURFACE_WRITE_3D,
+-             (PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                      NV_PGRAPH_SURFACE_WRITE_3D)+1)
+-                % PG_GET_MASK(NV_PGRAPH_SURFACE,
+-                           NV_PGRAPH_SURFACE_MODULO_3D) );
+-
+-    uint32_t new =
 -        PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
 +    qemu_mutex_lock(&pg->surface_lock);
 +
@@ -608,44 +489,17 @@ index 84650c7..8314b8a 100644
 +
 +    SET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D, (old + 1) % modulo);
 +    pgraph_surface_write_locked(pg, surface);
- 
--    PG_SET_MASK(NV_PGRAPH_SURFACE,
--             NV_PGRAPH_SURFACE_WRITE_3D,
--             (PG_GET_MASK(NV_PGRAPH_SURFACE,
--                      NV_PGRAPH_SURFACE_WRITE_3D)+1)
--                % PG_GET_MASK(NV_PGRAPH_SURFACE,
--                           NV_PGRAPH_SURFACE_MODULO_3D) );
++
 +    uint32_t new = GET_MASK(surface, NV_PGRAPH_SURFACE_WRITE_3D);
- 
--    uint32_t new =
--        PG_GET_MASK(NV_PGRAPH_SURFACE, NV_PGRAPH_SURFACE_WRITE_3D);
++
 +    qemu_mutex_unlock(&pg->surface_lock);
  
-     xemu_debug_tools_flip_stall_trace_record(
-         XEMU_DEBUG_TOOLS_FLIP_INCREMENT_WRITE, pg,
-@@ -2951,7 +3121,7 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
- {
-     d->pgraph.renderer->ops.surface_update(d, false, true, true);
- 
--    //PGRAPH_UNLOCK(&d->pgraph);
-+    //qemu_mutex_unlock(&d->pgraph.lock);
-     //bql_lock();
- 
-     uint32_t semaphore_offset = pgraph_reg_r(pg, NV_PGRAPH_SEMAPHOREOFFSET);
-@@ -2964,7 +3134,7 @@ DEF_METHOD(NV097, BACK_END_WRITE_SEMAPHORE_RELEASE)
- 
-     stl_le_p((uint32_t*)semaphore_data, parameter);
- 
--    //PGRAPH_LOCK(&d->pgraph);
-+    //qemu_mutex_lock(&d->pgraph.lock);
-     //bql_unlock();
- }
- 
+     trace_nv2a_pgraph_flip_increment_write(old, new);
+     pg->frame_time++;
 diff --git a/hw/xbox/nv2a/pgraph/pgraph.h b/hw/xbox/nv2a/pgraph/pgraph.h
-index 0660a3d..025684c 100644
 --- a/hw/xbox/nv2a/pgraph/pgraph.h
 +++ b/hw/xbox/nv2a/pgraph/pgraph.h
-@@ -140,6 +140,14 @@ typedef struct PGRAPHState {
+@@ -139,6 +139,14 @@
      QemuMutex lock;
      QemuMutex renderer_lock;
  
@@ -660,10 +514,11 @@ index 0660a3d..025684c 100644
      uint32_t pending_interrupts;
      uint32_t enabled_interrupts;
  
-@@ -292,6 +300,33 @@ static inline void pgraph_unlock_observed(PGRAPHState *pg, const char *file,
- #define PGRAPH_LOCK(pg) pgraph_lock_observed((pg), __FILE__, __LINE__)
- #define PGRAPH_UNLOCK(pg) pgraph_unlock_observed((pg), __FILE__, __LINE__)
- 
+@@ -271,6 +279,33 @@
+         PGRAPHVkState *vk_renderer_state;
+     };
+ } PGRAPHState;
++
 +static inline void pgraph_cpu_mmio_access_begin(PGRAPHState *pg)
 +{
 +    qemu_mutex_lock(&pg->cpu_mmio_access_lock);
@@ -690,19 +545,17 @@ index 0660a3d..025684c 100644
 +    }
 +    qemu_mutex_unlock(&pg->cpu_mmio_access_lock);
 +}
-+
+ 
  void pgraph_init(NV2AState *d);
  void pgraph_init_thread(NV2AState *d);
- void pgraph_destroy(PGRAPHState *pg);
 diff --git a/hw/xbox/nv2a/pgraph/vk/renderer.c b/hw/xbox/nv2a/pgraph/vk/renderer.c
-index 89c9779..c43276a 100644
 --- a/hw/xbox/nv2a/pgraph/vk/renderer.c
 +++ b/hw/xbox/nv2a/pgraph/vk/renderer.c
-@@ -123,6 +123,7 @@ static void pgraph_vk_process_pending(NV2AState *d)
+@@ -123,6 +123,7 @@
          qatomic_read(&d->pgraph.flush_pending)
      ) {
          qemu_mutex_unlock(&d->pfifo.lock);
 +        pgraph_wait_for_cpu_mmio_accesses(&d->pgraph);
-         PGRAPH_LOCK(&d->pgraph);
+         qemu_mutex_lock(&d->pgraph.lock);
          if (qatomic_read(&r->downloads_pending)) {
              pgraph_vk_process_pending_downloads(d);

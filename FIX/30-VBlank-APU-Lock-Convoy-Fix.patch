@@ -1,14 +1,14 @@
 diff --git a/hw/xbox/mcpx/apu/vp/vp.c b/hw/xbox/mcpx/apu/vp/vp.c
-index c57ecb634febfdf1b9f6434e98f010b6d35428e1..c32b6acd6fa7c3f1924fdfaf56df01c77c13fa68 100644
 --- a/hw/xbox/mcpx/apu/vp/vp.c
 +++ b/hw/xbox/mcpx/apu/vp/vp.c
-@@ -134,17 +134,16 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+@@ -134,17 +134,16 @@
  static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
  {
      assert(v < MCPX_HW_MAX_VOICES);
 -    qemu_mutex_lock(&d->lock);
- 
+-
 -    uint64_t mask = 1LL << (v % 64);
++
 +    /* Keep guest voice-lock MMIO from blocking on the APU frame mutex. */
 +    uint64_t mask = 1ULL << (v % 64);
      if (lock) {
@@ -24,7 +24,7 @@ index c57ecb634febfdf1b9f6434e98f010b6d35428e1..c32b6acd6fa7c3f1924fdfaf56df01c7
  }
  
  static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
-@@ -1874,7 +1873,9 @@ void mcpx_apu_vp_reset(MCPXAPUState *d)
+@@ -1874,7 +1873,9 @@
      memset(d->vp.ssl, 0, sizeof(d->vp.ssl));
      memset(d->vp.hrtf_submix, 0, sizeof(d->vp.hrtf_submix));
      memset(d->vp.submix_headroom, 0, sizeof(d->vp.submix_headroom));
@@ -36,12 +36,11 @@ index c57ecb634febfdf1b9f6434e98f010b6d35428e1..c32b6acd6fa7c3f1924fdfaf56df01c7
          hrtf_filter_init(&d->vp.filters[v].hrtf);
      }
 diff --git a/ui/xemu.c b/ui/xemu.c
-index 46ff05d604f0234504ea30557d1840487c478ecb..76742b5d9afe343447b0fa71ff9bd96fbc316356 100644
 --- a/ui/xemu.c
 +++ b/ui/xemu.c
-@@ -810,9 +810,9 @@ static void *vblank_timer_thread(void *opaque)
-         xemu_debug_tools_bql_trace_set_next_context(
-             XEMU_DEBUG_TOOLS_BQL_CONTEXT_UI_VBLANK);
+@@ -793,9 +793,9 @@
+         }
+ 
          if (!qatomic_read(&qemu_exiting)) {
 -            xemu_main_loop_lock();
 +            bql_lock();
